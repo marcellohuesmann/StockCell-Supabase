@@ -139,4 +139,7 @@ if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
     process.on('SIGTERM', () => {
         server.close(() => process.exit(0));
     });
-})();
+}
+
+// Exportar para Vercel Serverless
+module.exports = app;
