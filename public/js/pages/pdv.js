@@ -273,41 +273,9 @@ const PDVPage = {
     async _initChecks() {
         this.isCashRegisterClosed = false;
         try {
-            const [setRes, statRes] = await Promise.all([
-                API.get('/settings/store'),
-                API.get('/cashregister/status')
-            ]);
+            const statRes = await API.get('/cashregister/status');
             if (statRes.success && statRes.data.status === 'closed') {
-                const isStrict = setRes.success && setRes.data.pdv_strict_lock === 'true';
-                if (isStrict) {
-                    document.querySelector('.pdv-container').innerHTML = `
-                        <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;background:var(--bg-card);border-radius:var(--radius-lg);padding:var(--space-2xl);text-align:center;min-height:500px;">
-                            <div style="font-size:48px;margin-bottom:var(--space-md);">🔒</div>
-                            <h2 style="margin-bottom:var(--space-sm);">Caixa Fechado</h2>
-                            <p style="color:var(--text-secondary);margin-bottom:var(--space-lg);max-width:400px;">
-                                O bloqueio rigoroso do PDV está ativado. Para realizar qualquer venda, é necessário abrir o caixa primeiro.
-                            </p>
-                            <button class="btn btn-primary" onclick="App.navigate('cashregister')">Ir para Controle de Caixa</button>
-                        </div>
-                    `;
-                } else {
-                    this.isCashRegisterClosed = true;
-                    const banner = document.createElement('div');
-                    banner.style.cssText = 'background:var(--warning-bg);color:var(--warning);padding:var(--space-sm) var(--space-md);text-align:center;font-weight:600;font-size:var(--font-size-sm);border-bottom:1px solid rgba(255,186,8,0.2);';
-                    banner.innerHTML = '⚠️ Caixa Fechado. Pagamento em dinheiro bloqueado.';
-                    document.querySelector('.pdv-container').prepend(banner);
-
-                    const cashBtn = document.querySelector('.pdv-pay-btn[data-method="cash"]');
-                    if (cashBtn) {
-                        cashBtn.style.opacity = '0.5';
-                        cashBtn.style.cursor = 'not-allowed';
-                    }
-                    const splitCash = document.getElementById('pdv-split-cash');
-                    if (splitCash) {
-                        splitCash.disabled = true;
-                        splitCash.title = "Caixa Fechado";
-                    }
-                }
+                App.navigate('cashregister');
             }
         } catch (e) {}
     },

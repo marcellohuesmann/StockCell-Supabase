@@ -295,19 +295,6 @@ const SettingsPage = {
                 <div class="form-group"><label class="form-label">Telefone</label><input type="text" class="form-input" id="store-phone" value="${Utils.escapeHTML(data.store_phone || '')}" placeholder="(00) 00000-0000"></div>
                 <div class="form-group"><label class="form-label">Endereço</label><input type="text" class="form-input" id="store-address" value="${Utils.escapeHTML(data.store_address || '')}" placeholder="Rua, número - Bairro - Cidade/UF"></div>
                 
-                <hr style="border-color:var(--border-light);margin:var(--space-lg) 0;">
-                <h4 style="margin-bottom:var(--space-md);">🔒 Regras de Negócio</h4>
-                <div class="form-group">
-                    <label class="form-label" style="display:flex;align-items:center;gap:10px;">
-                        <input type="checkbox" id="store-pdv-strict" ${data.pdv_strict_lock === 'true' ? 'checked' : ''} style="width:18px;height:18px;accent-color:var(--accent-primary);cursor:pointer;">
-                        <strong>Bloqueio Rigoroso do PDV</strong>
-                    </label>
-                    <p style="color:var(--text-secondary);font-size:var(--font-size-xs);margin-top:4px;">
-                        Se ativado, o PDV ficará totalmente inacessível quando o caixa estiver fechado.<br>
-                        Se desativado, o PDV funcionará, mas o pagamento em <strong>Dinheiro</strong> será bloqueado (Abordagem Flexível).
-                    </p>
-                </div>
-                
 
                 <hr style="border-color:var(--border-light);margin:var(--space-lg) 0;">
                 <h4 style="margin-bottom:var(--space-md);">📧 Configurações de E-mail (SMTP)</h4>
@@ -346,7 +333,6 @@ const SettingsPage = {
                 store_cnpj: document.getElementById('store-cnpj').value,
                 store_phone: document.getElementById('store-phone').value,
                 store_address: document.getElementById('store-address').value,
-                pdv_strict_lock: document.getElementById('store-pdv-strict').checked ? 'true' : 'false',
                 smtp_host: document.getElementById('store-smtp-host').value,
                 smtp_port: document.getElementById('store-smtp-port').value,
                 smtp_user: document.getElementById('store-smtp-user').value,
