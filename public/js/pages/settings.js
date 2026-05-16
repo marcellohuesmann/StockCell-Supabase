@@ -367,6 +367,17 @@ const SettingsPage = {
                 <small style="color:var(--text-muted);font-size:11px;margin-top:8px;display:block;">
                     A exportação baixa um arquivo com todos os produtos, clientes, vendas e histórico salvos neste dispositivo.
                 </small>
+
+                ${App.session?.role === 'admin' ? `
+                <hr style="border-color:var(--danger);margin:var(--space-xl) 0;">
+                <h4 style="margin-bottom:var(--space-md);color:var(--danger);">🧨 ZONA DE RISCO</h4>
+                <p style="color:var(--text-secondary);font-size:var(--font-size-sm);margin-bottom:var(--space-md);">
+                    Limpa completamente o banco de dados (produtos, vendas, clientes, etc.), mantendo <b>apenas as configurações e os usuários (logins)</b>. Ideal para apagar dados de teste.
+                </p>
+                <button class="btn btn-secondary" id="btn-factory-reset" style="border-color:var(--danger);color:var(--danger);width:100%;">
+                    ⚠️ LIMPAR BANCO DE DADOS (Zerar Tudo)
+                </button>
+                ` : ''}
             </div>
         `;
         document.getElementById('btn-save-store').addEventListener('click', async () => {
@@ -460,6 +471,58 @@ const SettingsPage = {
                 statusEl.style.color = 'var(--danger)';
             }
         });
+
+        // Lógica de Factory Reset
+        const btnReset = document.getElementById('btn-factory-reset');
+        if (btnReset) {
+            btnReset.addEventListener('click', () => {
+                Modal.open({
+                    title: '⚠️ Limpar Banco de Dados',
+                    size: 'sm',
+                    content: `
+                        <div style="color:var(--danger);margin-bottom:var(--space-md);background:rgba(239,68,68,0.1);padding:var(--space-md);border-radius:var(--radius-md);">
+                            <strong>Atenção:</strong> Esta ação é <b>IRREVERSÍVEL</b> e apagará todos os dados de vendas, produtos, clientes e estoque. Apenas usuários e configurações serão mantidos.
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Para confirmar, digite sua senha de Administrador:</label>
+                            <input type="password" id="reset-password-input" class="form-input" placeholder="Senha do administrador">
+                        </div>
+                    `,
+                    footer: `
+                        <button class="btn btn-secondary" onclick="document.querySelector('.modal-overlay').remove()">Cancelar</button>
+                        <button class="btn btn-primary" style="background:var(--danger);border-color:var(--danger);" id="btn-confirm-reset">
+                            ESTOU CIENTE, APAGAR TUDO
+                        </button>
+                    `
+                });
+
+                document.getElementById('btn-confirm-reset').addEventListener('click', async () => {
+                    const pw = document.getElementById('reset-password-input').value;
+                    if (!pw) { Toast.warning('Digite a senha para confirmar.'); return; }
+                    
+                    const btn = document.getElementById('btn-confirm-reset');
+                    btn.disabled = true;
+                    btn.textContent = 'Apagando banco de dados...';
+
+                    const r = await API.post('/settings/factory-reset', { password: pw });
+                    if (r.success) {
+                        Toast.success(r.message);
+                        document.querySelector('.modal-overlay').remove();
+                        // Limpa o banco offline também
+                        try {
+                            for (const store of OfflineDB.STORES) {
+                                if (store !== 'app_settings') await OfflineDB.clear(store);
+                            }
+                        } catch(e) {}
+                        setTimeout(() => window.location.reload(), 2000);
+                    } else {
+                        Toast.error(r.message);
+                        btn.disabled = false;
+                        btn.textContent = 'ESTOU CIENTE, APAGAR TUDO';
+                    }
+                });
+            });
+        }
 
         // Lógica de Exportação PWA
         document.getElementById('btn-export-pwa').addEventListener('click', async () => {

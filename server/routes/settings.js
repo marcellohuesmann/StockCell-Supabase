@@ -127,4 +127,50 @@ router.post('/restore-execute', requireAdmin, (req, res) => {
     res.status(500).json({ success: false, message: 'A operação de restauração não é mais suportada na infraestrutura em nuvem.' });
 });
 
+/** POST /api/settings/factory-reset */
+const bcrypt = require('bcrypt');
+router.post('/factory-reset', requireAdmin, async (req, res) => {
+    try {
+        const { password } = req.body;
+        if (!password) {
+            return res.status(400).json({ success: false, message: 'Senha é obrigatória.' });
+        }
+
+        // Validate admin password
+        const { data: user, error: userError } = await supabase
+            .from('users')
+            .select('password_hash')
+            .eq('id', req.session.userId)
+            .single();
+
+        if (userError || !user) {
+            return res.status(401).json({ success: false, message: 'Erro ao validar administrador.' });
+        }
+
+        const passwordValid = bcrypt.compareSync(password, user.password_hash);
+        if (!passwordValid) {
+            return res.status(403).json({ success: false, message: 'Senha incorreta.' });
+        }
+
+        // Call the RPC function to reset the database
+        const { error: rpcError } = await supabase.rpc('factory_reset');
+        
+        if (rpcError) {
+            console.error('RPC Error:', rpcError);
+            return res.status(500).json({ success: false, message: 'A função factory_reset não foi encontrada no banco de dados. Veja as instruções para criá-la.' });
+        }
+
+        await supabase.from('activity_log').insert({
+            user_id: req.session.userId,
+            action: 'factory_reset',
+            description: 'Reset de fábrica realizado com sucesso'
+        });
+
+        res.json({ success: true, message: 'Dados resetados com sucesso! Os logins foram preservados.' });
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ success: false, message: 'Erro interno ao realizar reset de fábrica.' });
+    }
+});
+
 module.exports = router;
