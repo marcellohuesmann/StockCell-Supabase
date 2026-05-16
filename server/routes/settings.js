@@ -59,12 +59,11 @@ router.put('/permissions', requireAdmin, async (req, res) => {
 /** GET /api/settings/store */
 router.get('/store', async (req, res) => {
     try {
-        const keys = ['store_name', 'store_logo', 'store_cnpj', 'store_phone', 'store_address', 'pdv_strict_lock', 'terminal_mode', 'smtp_host', 'smtp_port', 'smtp_user', 'smtp_pass'];
+        const keys = ['store_name', 'store_logo', 'store_cnpj', 'store_phone', 'store_address', 'pdv_strict_lock', 'smtp_host', 'smtp_port', 'smtp_user', 'smtp_pass'];
         const { data: rows } = await supabase.from('app_settings').select('key, value').in('key', keys);
         const data = {};
         keys.forEach(k => data[k] = '');
         (rows || []).forEach(r => data[r.key] = r.value);
-        if (!data['terminal_mode']) data['terminal_mode'] = 'mobile_main';
         res.json({ success: true, data });
     } catch (e) { res.status(500).json({ success: false, message: 'Erro ao carregar configura\u00e7\u00f5es.' }); }
 });
@@ -72,7 +71,7 @@ router.get('/store', async (req, res) => {
 /** PUT /api/settings/store */
 router.put('/store', requireAdmin, async (req, res) => {
     try {
-        const { store_name, store_logo, store_cnpj, store_phone, store_address, pdv_strict_lock, terminal_mode, smtp_host, smtp_port, smtp_user, smtp_pass } = req.body;
+        const { store_name, store_logo, store_cnpj, store_phone, store_address, pdv_strict_lock, smtp_host, smtp_port, smtp_user, smtp_pass } = req.body;
         
         const updates = [
             { key: 'store_name', value: store_name || '' },
@@ -80,7 +79,6 @@ router.put('/store', requireAdmin, async (req, res) => {
             { key: 'store_phone', value: store_phone || '' },
             { key: 'store_address', value: store_address || '' },
             { key: 'pdv_strict_lock', value: pdv_strict_lock || 'false' },
-            { key: 'terminal_mode', value: terminal_mode || 'mobile_main' },
             { key: 'smtp_host', value: smtp_host || '' },
             { key: 'smtp_port', value: smtp_port || '' },
             { key: 'smtp_user', value: smtp_user || '' },
