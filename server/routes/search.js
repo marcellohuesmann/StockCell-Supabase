@@ -1,5 +1,5 @@
 const express = require('express');
-const { getDatabase } = require('../database/init');
+const supabase = require('../database/supabase');
 const { requireAuth } = require('../middleware/auth');
 const router = express.Router();
 
@@ -9,46 +9,48 @@ router.use(requireAuth);
  * GET /api/search?q=query
  * Global search across products, customers, and sales
  */
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
     try {
         const query = req.query.q;
         if (!query || query.length < 2) {
             return res.json({ success: true, data: { products: [], customers: [], sales: [] } });
         }
 
-        const db = getDatabase();
         const searchPattern = `%${query}%`;
 
         // 1. Search Products
-        const products = db.prepare(`
-            SELECT id, name, barcode, internal_code, sale_price, current_stock, image_path 
-            FROM products 
-            WHERE (name LIKE ? OR barcode LIKE ? OR internal_code LIKE ?) AND active = 1
-            LIMIT 10
-        `).all(searchPattern, searchPattern, searchPattern);
+        const { data: products } = await supabase.from('products')
+            .select('id, name, barcode, internal_code, sale_price, current_stock, image_path')
+            .eq('active', true)
+            .or(`name.ilike.${searchPattern},barcode.ilike.${searchPattern},internal_code.ilike.${searchPattern}`)
+            .limit(10);
 
         // 2. Search Customers
-        const customers = db.prepare(`
-            SELECT id, name, cpf as document, phone 
-            FROM customers 
-            WHERE (name LIKE ? OR cpf LIKE ? OR phone LIKE ?) AND active = 1
-            LIMIT 10
-        `).all(searchPattern, searchPattern, searchPattern);
+        const { data: customersRaw } = await supabase.from('customers')
+            .select('id, name, cpf, phone')
+            .eq('active', true)
+            .or(`name.ilike.${searchPattern},cpf.ilike.${searchPattern},phone.ilike.${searchPattern}`)
+            .limit(10);
+            
+        const customers = (customersRaw || []).map(c => ({ ...c, document: c.cpf }));
 
         // 3. Search Sales
-        const sales = db.prepare(`
-            SELECT id, uuid, total, status, created_at 
-            FROM sales 
-            WHERE (id LIKE ? OR uuid LIKE ?)
-            LIMIT 10
-        `).all(searchPattern, searchPattern);
+        let salesQuery = supabase.from('sales').select('id, uuid, total, status, created_at');
+        const isNumeric = /^\d+$/.test(query);
+        if (isNumeric) {
+            salesQuery = salesQuery.or(`id.eq.${query},uuid.ilike.${searchPattern}`);
+        } else {
+            salesQuery = salesQuery.or(`uuid.ilike.${searchPattern}`);
+        }
+        
+        const { data: sales } = await salesQuery.limit(10);
 
         res.json({ 
             success: true, 
             data: { 
-                products, 
-                customers, 
-                sales 
+                products: products || [], 
+                customers: customers || [], 
+                sales: sales || [] 
             } 
         });
     } catch (error) {

@@ -1,7 +1,6 @@
 const express = require('express');
 const bcrypt = require('bcrypt');
-const { getDatabase } = require('../database/init');
-const { logActivity } = require('../middleware/logger');
+const supabase = require('../database/supabase');
 
 const router = express.Router();
 
@@ -9,7 +8,7 @@ const router = express.Router();
  * POST /api/auth/login
  * Autentica o usuário
  */
-router.post('/login', (req, res) => {
+router.post('/login', async (req, res) => {
     try {
         const { username, password } = req.body;
 
@@ -20,12 +19,13 @@ router.post('/login', (req, res) => {
             });
         }
 
-        const db = getDatabase();
-        const user = db.prepare(
-            'SELECT id, username, password_hash, full_name, role, active FROM users WHERE username = ?'
-        ).get(username.toLowerCase().trim());
+        const { data: user, error } = await supabase
+            .from('users')
+            .select('id, username, password_hash, full_name, role, active')
+            .eq('username', username.toLowerCase().trim())
+            .single();
 
-        if (!user) {
+        if (error || !user) {
             return res.status(401).json({
                 success: false,
                 message: 'Usuário ou senha incorretos.',
@@ -43,10 +43,11 @@ router.post('/login', (req, res) => {
 
         if (!passwordValid) {
             // Registrar tentativa falha
-            db.prepare(`
-                INSERT INTO activity_log (user_id, action, description)
-                VALUES (?, 'login_failed', 'Tentativa de login com senha incorreta')
-            `).run(user.id);
+            await supabase.from('activity_log').insert({
+                user_id: user.id,
+                action: 'login_failed',
+                description: 'Tentativa de login com senha incorreta'
+            });
 
             return res.status(401).json({
                 success: false,
@@ -61,10 +62,11 @@ router.post('/login', (req, res) => {
         req.session.role = user.role;
 
         // Registrar login bem-sucedido
-        db.prepare(`
-            INSERT INTO activity_log (user_id, action, description)
-            VALUES (?, 'login', 'Login realizado com sucesso')
-        `).run(user.id);
+        await supabase.from('activity_log').insert({
+            user_id: user.id,
+            action: 'login',
+            description: 'Login realizado com sucesso'
+        });
 
         res.json({
             success: true,
@@ -89,16 +91,16 @@ router.post('/login', (req, res) => {
  * POST /api/auth/logout
  * Encerra a sessão do usuário
  */
-router.post('/logout', (req, res) => {
+router.post('/logout', async (req, res) => {
     const userId = req.session?.userId;
 
     if (userId) {
         try {
-            const db = getDatabase();
-            db.prepare(`
-                INSERT INTO activity_log (user_id, action, description)
-                VALUES (?, 'logout', 'Logout realizado')
-            `).run(userId);
+            await supabase.from('activity_log').insert({
+                user_id: userId,
+                action: 'logout',
+                description: 'Logout realizado'
+            });
         } catch (err) {
             // Silently fail - logout should always work
         }
@@ -146,7 +148,7 @@ router.get('/session', (req, res) => {
  * PUT /api/auth/password
  * Altera a senha do usuário logado
  */
-router.put('/password', (req, res) => {
+router.put('/password', async (req, res) => {
     try {
         if (!req.session?.userId) {
             return res.status(401).json({
@@ -171,10 +173,13 @@ router.put('/password', (req, res) => {
             });
         }
 
-        const db = getDatabase();
-        const user = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(req.session.userId);
+        const { data: user, error: userError } = await supabase
+            .from('users')
+            .select('password_hash')
+            .eq('id', req.session.userId)
+            .single();
 
-        if (!bcrypt.compareSync(currentPassword, user.password_hash)) {
+        if (userError || !user || !bcrypt.compareSync(currentPassword, user.password_hash)) {
             return res.status(400).json({
                 success: false,
                 message: 'Senha atual incorreta.',
@@ -182,13 +187,20 @@ router.put('/password', (req, res) => {
         }
 
         const newHash = bcrypt.hashSync(newPassword, 12);
-        db.prepare('UPDATE users SET password_hash = ?, updated_at = datetime(\'now\',\'localtime\') WHERE id = ?')
-            .run(newHash, req.session.userId);
+        
+        await supabase
+            .from('users')
+            .update({ 
+                password_hash: newHash,
+                updated_at: new Date().toISOString()
+            })
+            .eq('id', req.session.userId);
 
-        db.prepare(`
-            INSERT INTO activity_log (user_id, action, description)
-            VALUES (?, 'password_change', 'Senha alterada com sucesso')
-        `).run(req.session.userId);
+        await supabase.from('activity_log').insert({
+            user_id: req.session.userId,
+            action: 'password_change',
+            description: 'Senha alterada com sucesso'
+        });
 
         res.json({
             success: true,

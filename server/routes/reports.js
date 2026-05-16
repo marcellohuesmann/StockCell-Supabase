@@ -1,5 +1,5 @@
 const express = require('express');
-const { getDatabase } = require('../database/init');
+const supabase = require('../database/supabase');
 const { requireAuth } = require('../middleware/auth');
 const router = express.Router();
 router.use(requireAuth);
@@ -8,79 +8,66 @@ router.use(requireAuth);
  * GET /api/reports/sales
  * Relatório de vendas por período
  */
-router.get('/sales', (req, res) => {
+router.get('/sales', async (req, res) => {
     try {
-        const db = getDatabase();
         const { start, end } = req.query;
-        if (!start || !end) {
-            return res.status(400).json({ success: false, message: 'Informe data inicial e final.' });
-        }
+        if (!start || !end) return res.status(400).json({ success: false, message: 'Informe data inicial e final.' });
 
-        // Resumo geral
-        const summary = db.prepare(`
-            SELECT
-                COUNT(*) as total_sales,
-                COALESCE(SUM(total), 0) as revenue,
-                COALESCE(AVG(total), 0) as avg_ticket,
-                COALESCE(SUM(discount_amount), 0) as total_discounts
-            FROM sales
-            WHERE status = 'completed'
-              AND DATE(created_at) BETWEEN ? AND ?
-        `).get(start, end);
+        const endDay = new Date(end);
+        endDay.setDate(endDay.getDate() + 1);
 
-        // Vendas por dia (para gráfico)
-        const daily = db.prepare(`
-            SELECT DATE(created_at) as date,
-                   COUNT(*) as count,
-                   COALESCE(SUM(total), 0) as total
-            FROM sales
-            WHERE status = 'completed'
-              AND DATE(created_at) BETWEEN ? AND ?
-            GROUP BY DATE(created_at)
-            ORDER BY date
-        `).all(start, end);
+        const { data: salesRaw } = await supabase.from('sales')
+            .select('*, users(full_name), customers(name), payments(method, amount), sale_items(quantity, products(name))')
+            .eq('status', 'completed')
+            .gte('created_at', start)
+            .lt('created_at', endDay.toISOString());
+            
+        const salesData = salesRaw || [];
+        
+        let revenue = 0;
+        let total_discounts = 0;
+        let dailyMap = {};
+        let paymentMap = {};
+        
+        const sales = salesData.map(s => {
+            revenue += s.total;
+            total_discounts += s.discount_amount;
+            
+            const dateStr = s.created_at.split('T')[0];
+            if (!dailyMap[dateStr]) dailyMap[dateStr] = { date: dateStr, count: 0, total: 0 };
+            dailyMap[dateStr].count += 1;
+            dailyMap[dateStr].total += s.total;
+            
+            const methods = [];
+            (s.payments || []).forEach(pm => {
+                if (!paymentMap[pm.method]) paymentMap[pm.method] = { method: pm.method, count: 0, total: 0 };
+                paymentMap[pm.method].count += 1;
+                paymentMap[pm.method].total += pm.amount;
+                methods.push(pm.method);
+            });
+            
+            const productsSold = (s.sale_items || []).map(si => `${si.products?.name} (${si.quantity}x)`).join(', ');
+            
+            return {
+                id: s.id, total: s.total, discount_amount: s.discount_amount, created_at: s.created_at,
+                user_name: s.users?.full_name,
+                customer_name: s.customers?.name,
+                products_sold: productsSold,
+                methods: methods.join(', ')
+            };
+        }).sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
 
-        // Vendas por forma de pagamento
-        const byPayment = db.prepare(`
-            SELECT pm.method,
-                   COUNT(DISTINCT pm.sale_id) as count,
-                   COALESCE(SUM(pm.amount), 0) as total
-            FROM payments pm
-            JOIN sales s ON pm.sale_id = s.id
-            WHERE s.status = 'completed'
-              AND DATE(s.created_at) BETWEEN ? AND ?
-            GROUP BY pm.method
-            ORDER BY total DESC
-        `).all(start, end);
+        const summary = {
+            total_sales: salesData.length,
+            revenue: revenue,
+            avg_ticket: salesData.length ? revenue / salesData.length : 0,
+            total_discounts: total_discounts
+        };
+        
+        const daily = Object.values(dailyMap).sort((a, b) => a.date.localeCompare(b.date));
+        const byPayment = Object.values(paymentMap).sort((a, b) => b.total - a.total);
 
-        // Lista detalhada de vendas
-        const sales = db.prepare(`
-            SELECT s.id, s.total, s.discount_amount, s.created_at,
-                   u.full_name as user_name,
-                   c.name as customer_name,
-                   (
-                       SELECT GROUP_CONCAT(p.name || ' (' || si.quantity || 'x)', ', ')
-                       FROM sale_items si
-                       JOIN products p ON si.product_id = p.id
-                       WHERE si.sale_id = s.id
-                   ) as products_sold,
-                   (
-                       SELECT GROUP_CONCAT(method, ', ')
-                       FROM payments
-                       WHERE sale_id = s.id
-                   ) as methods
-            FROM sales s
-            LEFT JOIN users u ON s.user_id = u.id
-            LEFT JOIN customers c ON s.customer_id = c.id
-            WHERE s.status = 'completed'
-              AND DATE(s.created_at) BETWEEN ? AND ?
-            ORDER BY s.created_at DESC
-        `).all(start, end);
-
-        res.json({
-            success: true,
-            data: { summary, daily, byPayment, sales }
-        });
+        res.json({ success: true, data: { summary, daily, byPayment, sales } });
     } catch (error) {
         console.error('Erro relatorio vendas:', error);
         res.status(500).json({ success: false, message: 'Erro ao gerar relatório de vendas.' });
@@ -91,30 +78,42 @@ router.get('/sales', (req, res) => {
  * GET /api/reports/top-products
  * Ranking de produtos mais vendidos
  */
-router.get('/top-products', (req, res) => {
+router.get('/top-products', async (req, res) => {
     try {
-        const db = getDatabase();
         const { start, end } = req.query;
-        if (!start || !end) {
-            return res.status(400).json({ success: false, message: 'Informe data inicial e final.' });
-        }
+        if (!start || !end) return res.status(400).json({ success: false, message: 'Informe data inicial e final.' });
 
-        const products = db.prepare(`
-            SELECT p.id, p.name, p.barcode, p.internal_code,
-                   p.cost_price, p.sale_price, p.current_stock,
-                   COALESCE(SUM(si.quantity), 0) as qty_sold,
-                   COALESCE(SUM(si.total), 0) as revenue,
-                   COALESCE(SUM(si.quantity * p.cost_price), 0) as total_cost
-            FROM sale_items si
-            JOIN products p ON si.product_id = p.id
-            JOIN sales s ON si.sale_id = s.id
-            WHERE s.status = 'completed'
-              AND DATE(s.created_at) BETWEEN ? AND ?
-            GROUP BY si.product_id
-            ORDER BY qty_sold DESC
-        `).all(start, end);
+        const endDay = new Date(end);
+        endDay.setDate(endDay.getDate() + 1);
 
-        // Resumo
+        const { data: sales } = await supabase.from('sales')
+            .select('id, status, created_at, sale_items(quantity, total, product_id, products(id, name, barcode, internal_code, cost_price, sale_price, current_stock))')
+            .eq('status', 'completed')
+            .gte('created_at', start)
+            .lt('created_at', endDay.toISOString());
+
+        let productMap = {};
+        
+        (sales || []).forEach(s => {
+            (s.sale_items || []).forEach(si => {
+                const p = si.products;
+                if (p) {
+                    if (!productMap[p.id]) {
+                        productMap[p.id] = {
+                            id: p.id, name: p.name, barcode: p.barcode, internal_code: p.internal_code,
+                            cost_price: p.cost_price, sale_price: p.sale_price, current_stock: p.current_stock,
+                            qty_sold: 0, revenue: 0, total_cost: 0
+                        };
+                    }
+                    productMap[p.id].qty_sold += si.quantity;
+                    productMap[p.id].revenue += si.total;
+                    productMap[p.id].total_cost += si.quantity * p.cost_price;
+                }
+            });
+        });
+        
+        const products = Object.values(productMap).sort((a, b) => b.qty_sold - a.qty_sold);
+        
         const totalQty = products.reduce((s, p) => s + p.qty_sold, 0);
         const totalRevenue = products.reduce((s, p) => s + p.revenue, 0);
         const totalCost = products.reduce((s, p) => s + p.total_cost, 0);
@@ -122,13 +121,7 @@ router.get('/top-products', (req, res) => {
         res.json({
             success: true,
             data: {
-                summary: {
-                    unique_products: products.length,
-                    total_qty: totalQty,
-                    total_revenue: totalRevenue,
-                    total_cost: totalCost,
-                    gross_profit: totalRevenue - totalCost
-                },
+                summary: { unique_products: products.length, total_qty: totalQty, total_revenue: totalRevenue, total_cost: totalCost, gross_profit: totalRevenue - totalCost },
                 products
             }
         });
@@ -142,65 +135,65 @@ router.get('/top-products', (req, res) => {
  * GET /api/reports/cashflow
  * Fluxo de caixa (Receitas vs Despesas)
  */
-router.get('/cashflow', (req, res) => {
+router.get('/cashflow', async (req, res) => {
     try {
-        const db = getDatabase();
         const { start, end } = req.query;
-        if (!start || !end) {
-            return res.status(400).json({ success: false, message: 'Informe data inicial e final.' });
-        }
+        if (!start || !end) return res.status(400).json({ success: false, message: 'Informe data inicial e final.' });
 
-        // Vendas concluídas = entradas operacionais
-        const salesIncome = db.prepare(`
-            SELECT COALESCE(SUM(total), 0) as total
-            FROM sales
-            WHERE status = 'completed'
-              AND DATE(created_at) BETWEEN ? AND ?
-        `).get(start, end);
+        const endDay = new Date(end);
+        endDay.setDate(endDay.getDate() + 1);
 
-        // Transações do módulo financeiro
-        const financeData = db.prepare(`
-            SELECT
-                COALESCE(SUM(CASE WHEN type = 'income' AND status = 'completed' THEN amount ELSE 0 END), 0) as finance_income,
-                COALESCE(SUM(CASE WHEN type = 'expense' AND status = 'completed' THEN amount ELSE 0 END), 0) as finance_expense,
-                COALESCE(SUM(CASE WHEN type = 'income' AND status = 'pending' THEN amount ELSE 0 END), 0) as pending_income,
-                COALESCE(SUM(CASE WHEN type = 'expense' AND status = 'pending' THEN amount ELSE 0 END), 0) as pending_expense
-            FROM transactions
-            WHERE DATE(due_date) BETWEEN ? AND ?
-        `).get(start, end);
+        const { data: sales } = await supabase.from('sales')
+            .select('total, created_at')
+            .eq('status', 'completed')
+            .gte('created_at', start)
+            .lt('created_at', endDay.toISOString());
 
-        // Detalhamento por dia
-        const dailyCashflow = db.prepare(`
-            SELECT date, 
-                   SUM(income) as income, 
-                   SUM(expense) as expense
-            FROM (
-                SELECT DATE(created_at) as date, total as income, 0 as expense
-                FROM sales
-                WHERE status = 'completed' AND DATE(created_at) BETWEEN ? AND ?
-                UNION ALL
-                SELECT DATE(due_date) as date, 0 as income, amount as expense
-                FROM transactions
-                WHERE type = 'expense' AND status = 'completed' AND DATE(due_date) BETWEEN ? AND ?
-            )
-            GROUP BY date
-            ORDER BY date
-        `).all(start, end, start, end);
+        const { data: transactions } = await supabase.from('transactions')
+            .select('amount, type, status, due_date')
+            .gte('due_date', start)
+            .lte('due_date', end);
 
-        const totalIncome = salesIncome.total + financeData.finance_income;
-        const totalExpense = financeData.finance_expense;
+        let salesIncomeTotal = 0;
+        let dailyMap = {};
+
+        (sales || []).forEach(s => {
+            salesIncomeTotal += s.total;
+            const dateStr = s.created_at.split('T')[0];
+            if (!dailyMap[dateStr]) dailyMap[dateStr] = { date: dateStr, income: 0, expense: 0 };
+            dailyMap[dateStr].income += s.total;
+        });
+
+        let finance_income = 0;
+        let finance_expense = 0;
+        let pending_income = 0;
+        let pending_expense = 0;
+
+        (transactions || []).forEach(t => {
+            if (t.type === 'income') {
+                if (t.status === 'completed') finance_income += t.amount;
+                else pending_income += t.amount;
+            } else if (t.type === 'expense') {
+                if (t.status === 'completed') {
+                    finance_expense += t.amount;
+                    const dateStr = t.due_date;
+                    if (!dailyMap[dateStr]) dailyMap[dateStr] = { date: dateStr, income: 0, expense: 0 };
+                    dailyMap[dateStr].expense += t.amount;
+                }
+                else pending_expense += t.amount;
+            }
+        });
+
+        const dailyCashflow = Object.values(dailyMap).sort((a, b) => a.date.localeCompare(b.date));
+
+        const totalIncome = salesIncomeTotal + finance_income;
+        const totalExpense = finance_expense;
 
         res.json({
             success: true,
             data: {
                 summary: {
-                    sales_income: salesIncome.total,
-                    finance_income: financeData.finance_income,
-                    total_income: totalIncome,
-                    total_expense: totalExpense,
-                    net_balance: totalIncome - totalExpense,
-                    pending_income: financeData.pending_income,
-                    pending_expense: financeData.pending_expense
+                    sales_income: salesIncomeTotal, finance_income, total_income: totalIncome, total_expense: totalExpense, net_balance: totalIncome - totalExpense, pending_income, pending_expense
                 },
                 daily: dailyCashflow
             }
@@ -215,40 +208,37 @@ router.get('/cashflow', (req, res) => {
  * GET /api/reports/sellers
  * Relatório de Vendas por Vendedor (Comissões/Desempenho)
  */
-router.get('/sellers', (req, res) => {
+router.get('/sellers', async (req, res) => {
     try {
-        const db = getDatabase();
         const { start, end } = req.query;
-        if (!start || !end) {
-            return res.status(400).json({ success: false, message: 'Informe data inicial e final.' });
-        }
+        if (!start || !end) return res.status(400).json({ success: false, message: 'Informe data inicial e final.' });
 
-        const sellers = db.prepare(`
-            SELECT u.id, u.full_name as name,
-                   COUNT(s.id) as sales_count,
-                   COALESCE(SUM(s.total), 0) as revenue,
-                   COALESCE(SUM(s.discount_amount), 0) as total_discounts
-            FROM users u
-            JOIN sales s ON s.user_id = u.id
-            WHERE s.status = 'completed'
-              AND DATE(s.created_at) BETWEEN ? AND ?
-            GROUP BY u.id
-            ORDER BY revenue DESC
-        `).all(start, end);
+        const endDay = new Date(end);
+        endDay.setDate(endDay.getDate() + 1);
 
-        // Resumo
+        const { data: sales } = await supabase.from('sales')
+            .select('total, discount_amount, user_id, users(full_name)')
+            .eq('status', 'completed')
+            .gte('created_at', start)
+            .lt('created_at', endDay.toISOString());
+
+        let sellersMap = {};
+        (sales || []).forEach(s => {
+            if (!s.user_id) return;
+            if (!sellersMap[s.user_id]) sellersMap[s.user_id] = { id: s.user_id, name: s.users?.full_name, sales_count: 0, revenue: 0, total_discounts: 0 };
+            
+            sellersMap[s.user_id].sales_count += 1;
+            sellersMap[s.user_id].revenue += s.total;
+            sellersMap[s.user_id].total_discounts += s.discount_amount;
+        });
+
+        const sellers = Object.values(sellersMap).sort((a, b) => b.revenue - a.revenue);
         const totalRevenue = sellers.reduce((s, u) => s + u.revenue, 0);
         const totalSales = sellers.reduce((s, u) => s + u.sales_count, 0);
 
         res.json({
             success: true,
-            data: {
-                summary: {
-                    total_revenue: totalRevenue,
-                    total_sales: totalSales
-                },
-                sellers
-            }
+            data: { summary: { total_revenue: totalRevenue, total_sales: totalSales }, sellers }
         });
     } catch (error) {
         console.error('Erro relatorio vendedores:', error);

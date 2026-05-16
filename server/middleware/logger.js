@@ -1,4 +1,4 @@
-const { getDatabase } = require('../database/init');
+const supabase = require('../database/supabase');
 
 /**
  * Middleware de log de atividades
@@ -7,20 +7,16 @@ const { getDatabase } = require('../database/init');
 function logActivity(action, entity = null, entityId = null, description = null) {
     return (req, res, next) => {
         // Registra após a resposta ser enviada
-        res.on('finish', () => {
+        res.on('finish', async () => {
             if (res.statusCode >= 200 && res.statusCode < 300) {
                 try {
-                    const db = getDatabase();
-                    db.prepare(`
-                        INSERT INTO activity_log (user_id, action, entity, entity_id, description)
-                        VALUES (?, ?, ?, ?, ?)
-                    `).run(
-                        req.session?.userId || null,
+                    await supabase.from('activity_log').insert({
+                        user_id: req.session?.userId || null,
                         action,
                         entity,
-                        entityId,
-                        description || `${action} executado com sucesso`
-                    );
+                        entity_id: entityId,
+                        description: description || `${action} executado com sucesso`
+                    });
                 } catch (err) {
                     console.error('Erro ao registrar atividade:', err.message);
                 }

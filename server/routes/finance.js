@@ -2,33 +2,22 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const { getDatabase } = require('../database/init');
+const supabase = require('../database/supabase');
 const { requireAuth } = require('../middleware/auth');
 const router = express.Router();
 
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        const dest = path.join(__dirname, '../../public/uploads/finance');
-        if (!fs.existsSync(dest)) fs.mkdirSync(dest, { recursive: true });
-        cb(null, dest);
-    },
-    filename: (req, file, cb) => {
-        const ext = path.extname(file.originalname).toLowerCase();
-        cb(null, `tx_${req.params.id}_${Date.now()}${ext}`);
-    }
-});
+const storage = multer.memoryStorage();
 const upload = multer({ storage, limits: { fileSize: 5 * 1024 * 1024 } }); // 5MB limit
 
 router.use(requireAuth);
 
 // Check permission middleware specifically for finance
-const requireFinance = (req, res, next) => {
+const requireFinance = async (req, res, next) => {
     try {
-        const db = getDatabase();
         const role = req.session.role;
         if (role === 'admin') return next();
         
-        const row = db.prepare("SELECT value FROM app_settings WHERE key = 'permissions'").get();
+        const { data: row } = await supabase.from('app_settings').select('value').eq('key', 'permissions').maybeSingle();
         if (row) {
             const permissions = JSON.parse(row.value);
             if (permissions.finance_manage && permissions.finance_manage.operator) {
@@ -47,10 +36,10 @@ router.use(requireFinance);
  * GET /api/finance/categories
  * List financial categories
  */
-router.get('/categories', (req, res) => {
+router.get('/categories', async (req, res) => {
     try {
-        const db = getDatabase();
-        const categories = db.prepare("SELECT * FROM transaction_categories ORDER BY type, name").all();
+        const { data: categories, error } = await supabase.from('transaction_categories').select('*').order('type').order('name');
+        if (error) throw error;
         res.json({ success: true, data: categories });
     } catch (error) {
         console.error('Erro ao listar categorias:', error);
@@ -62,18 +51,15 @@ router.get('/categories', (req, res) => {
  * POST /api/finance/categories
  * Create new category
  */
-router.post('/categories', (req, res) => {
+router.post('/categories', async (req, res) => {
     try {
         const { name, type, color } = req.body;
         if (!name || !type) return res.status(400).json({ success: false, message: 'Nome e tipo são obrigatórios.' });
 
-        const db = getDatabase();
-        const info = db.prepare(`
-            INSERT INTO transaction_categories (name, type, color) 
-            VALUES (?, ?, ?)
-        `).run(name, type, color || '#808080');
+        const { data: info, error } = await supabase.from('transaction_categories').insert({ name, type, color: color || '#808080' }).select('id').single();
+        if (error) throw error;
 
-        res.status(201).json({ success: true, message: 'Categoria criada.', data: { id: info.lastInsertRowid } });
+        res.status(201).json({ success: true, message: 'Categoria criada.', data: { id: info.id } });
     } catch (error) {
         res.status(500).json({ success: false, message: 'Erro ao criar categoria.' });
     }
@@ -82,11 +68,11 @@ router.post('/categories', (req, res) => {
 /**
  * PUT /api/finance/categories/:id
  */
-router.put('/categories/:id', (req, res) => {
+router.put('/categories/:id', async (req, res) => {
     try {
         const { name, type, color } = req.body;
-        const db = getDatabase();
-        db.prepare("UPDATE transaction_categories SET name = ?, type = ?, color = ? WHERE id = ?").run(name, type, color, req.params.id);
+        const { error } = await supabase.from('transaction_categories').update({ name, type, color }).eq('id', req.params.id);
+        if (error) throw error;
         res.json({ success: true, message: 'Categoria atualizada.' });
     } catch (error) {
         res.status(500).json({ success: false, message: 'Erro ao atualizar categoria.' });
@@ -96,14 +82,12 @@ router.put('/categories/:id', (req, res) => {
 /**
  * DELETE /api/finance/categories/:id
  */
-router.delete('/categories/:id', (req, res) => {
+router.delete('/categories/:id', async (req, res) => {
     try {
-        const db = getDatabase();
-        // Verifica se está em uso
-        const inUse = db.prepare("SELECT id FROM transactions WHERE category_id = ? LIMIT 1").get(req.params.id);
+        const { data: inUse } = await supabase.from('transactions').select('id').eq('category_id', req.params.id).limit(1).maybeSingle();
         if (inUse) return res.status(400).json({ success: false, message: 'Esta categoria está em uso e não pode ser excluída.' });
         
-        db.prepare("DELETE FROM transaction_categories WHERE id = ?").run(req.params.id);
+        await supabase.from('transaction_categories').delete().eq('id', req.params.id);
         res.json({ success: true, message: 'Categoria excluída.' });
     } catch (error) {
         res.status(500).json({ success: false, message: 'Erro ao excluir categoria.' });
@@ -114,45 +98,44 @@ router.delete('/categories/:id', (req, res) => {
  * GET /api/finance/transactions
  * List transactions with filters (month, status, type)
  */
-router.get('/transactions', (req, res) => {
+router.get('/transactions', async (req, res) => {
     try {
-        const db = getDatabase();
-        let query = `
-            SELECT t.*, c.name as category_name, c.color as category_color 
-            FROM transactions t
-            LEFT JOIN transaction_categories c ON t.category_id = c.id
-            WHERE 1=1
-        `;
-        const params = [];
+        let query = supabase.from('transactions').select('*, transaction_categories(name, color)');
 
-        if (req.query.type) {
-            query += " AND t.type = ?";
-            params.push(req.query.type);
-        }
-        if (req.query.status) {
-            query += " AND t.status = ?";
-            params.push(req.query.status);
-        }
+        if (req.query.type) query = query.eq('type', req.query.type);
+        if (req.query.status) query = query.eq('status', req.query.status);
         if (req.query.month) {
-            query += " AND strftime('%Y-%m', t.due_date) = ?";
-            params.push(req.query.month);
+            const startMonth = `${req.query.month}-01`;
+            const d = new Date(`${req.query.month}-01`);
+            d.setMonth(d.getMonth() + 1);
+            const endMonth = d.toISOString().split('T')[0];
+            query = query.gte('due_date', startMonth).lt('due_date', endMonth);
         }
 
-        query += " ORDER BY t.due_date DESC, t.created_at DESC";
-        const transactions = db.prepare(query).all(...params);
+        query = query.order('due_date', { ascending: false }).order('created_at', { ascending: false });
+        
+        const { data: rawTransactions, error } = await query;
+        if (error) throw error;
+        
+        let transactions = (rawTransactions || []).map(t => ({
+            ...t,
+            category_name: t.transaction_categories?.name,
+            category_color: t.transaction_categories?.color
+        }));
 
         if (transactions.length > 0) {
-            const txIds = transactions.map(t => t.id).join(',');
-            const payments = db.prepare(`SELECT * FROM transaction_payments WHERE transaction_id IN (${txIds}) ORDER BY payment_date ASC`).all();
+            const txIds = transactions.map(t => t.id);
+            const { data: payments } = await supabase.from('transaction_payments').select('*').in('transaction_id', txIds).order('payment_date', { ascending: true });
+            
             transactions.forEach(t => {
-                t.payments = payments.filter(p => p.transaction_id === t.id);
+                t.payments = (payments || []).filter(p => p.transaction_id === t.id);
             });
         }
 
         res.json({ success: true, data: transactions });
     } catch (error) {
         console.error('Erro ao listar transacoes:', error);
-        res.status(500).json({ success: false, message: 'Erro ao buscar transa\u00e7\u00f5es.' });
+        res.status(500).json({ success: false, message: 'Erro ao buscar transações.' });
     }
 });
 
@@ -160,22 +143,44 @@ router.get('/transactions', (req, res) => {
  * GET /api/finance/summary
  * Get financial summary for a month
  */
-router.get('/summary', (req, res) => {
+router.get('/summary', async (req, res) => {
     try {
-        const db = getDatabase();
         const d = new Date();
         const localMonth = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
         const month = req.query.month || localMonth;
         
-        const summary = db.prepare(`
-            SELECT 
-                SUM(CASE WHEN type = 'income' THEN paid_amount ELSE 0 END) as total_received,
-                SUM(CASE WHEN type = 'income' AND status != 'completed' THEN amount - paid_amount ELSE 0 END) as total_to_receive,
-                SUM(CASE WHEN type = 'expense' THEN paid_amount ELSE 0 END) as total_paid,
-                SUM(CASE WHEN type = 'expense' AND status != 'completed' THEN amount - paid_amount ELSE 0 END) as total_to_pay
-            FROM transactions 
-            WHERE strftime('%Y-%m', due_date) = ?
-        `).get(month);
+        const startMonth = `${month}-01`;
+        const dateObj = new Date(`${month}-01`);
+        dateObj.setMonth(dateObj.getMonth() + 1);
+        const endMonth = dateObj.toISOString().split('T')[0];
+        
+        const { data: txs, error } = await supabase.from('transactions')
+            .select('type, status, amount, paid_amount')
+            .gte('due_date', startMonth)
+            .lt('due_date', endMonth);
+            
+        if (error) throw error;
+        
+        let total_received = 0;
+        let total_to_receive = 0;
+        let total_paid = 0;
+        let total_to_pay = 0;
+        
+        (txs || []).forEach(tx => {
+            if (tx.type === 'income') {
+                total_received += tx.paid_amount || 0;
+                if (tx.status !== 'completed') {
+                    total_to_receive += (tx.amount - (tx.paid_amount || 0));
+                }
+            } else if (tx.type === 'expense') {
+                total_paid += tx.paid_amount || 0;
+                if (tx.status !== 'completed') {
+                    total_to_pay += (tx.amount - (tx.paid_amount || 0));
+                }
+            }
+        });
+
+        const summary = { total_received, total_to_receive, total_paid, total_to_pay };
 
         res.json({ success: true, data: summary });
     } catch (error) {
@@ -185,7 +190,7 @@ router.get('/summary', (req, res) => {
 });
 
 // POST /api/finance/transactions
-router.post('/transactions', (req, res) => {
+router.post('/transactions', async (req, res) => {
     try {
         const { type, description, amount, status, due_date, notes, category_id, account_id, barcode } = req.body;
         const parsedAmount = parseFloat(amount);
@@ -196,27 +201,25 @@ router.post('/transactions', (req, res) => {
         const initialStatus = status || 'pending';
         const paidAmount = initialStatus === 'completed' ? parsedAmount : 0;
 
-        const db = getDatabase();
+        const { data: info, error } = await supabase.from('transactions').insert({
+            type, category_id: category_id || null, description, amount: parsedAmount, paid_amount: paidAmount, status: initialStatus, due_date, notes: notes || '', barcode: barcode || null
+        }).select('id').single();
+        if (error) throw error;
         
-        let txId = null;
-        db.transaction(() => {
-            const info = db.prepare(`
-                INSERT INTO transactions (type, category_id, description, amount, paid_amount, status, due_date, notes, barcode) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `).run(type, category_id || null, description, parsedAmount, paidAmount, initialStatus, due_date, notes || '', barcode || null);
-            txId = info.lastInsertRowid;
+        const txId = info.id;
 
-            if (initialStatus === 'completed' && account_id) {
-                const payDate = new Date().toISOString().substring(0, 10);
-                db.prepare(`
-                    INSERT INTO transaction_payments (transaction_id, account_id, amount, payment_method, payment_date)
-                    VALUES (?, ?, ?, ?, ?)
-                `).run(txId, account_id, parsedAmount, 'cash', payDate);
+        if (initialStatus === 'completed' && account_id) {
+            const payDate = new Date().toISOString().substring(0, 10);
+            await supabase.from('transaction_payments').insert({
+                transaction_id: txId, account_id, amount: parsedAmount, payment_method: 'cash', payment_date: payDate
+            });
 
-                const op = type === 'income' ? '+' : '-';
-                db.prepare(`UPDATE bank_accounts SET current_balance = current_balance ${op} ? WHERE id = ?`).run(parsedAmount, account_id);
+            const { data: acc } = await supabase.from('bank_accounts').select('current_balance').eq('id', account_id).single();
+            if (acc) {
+                const newBal = type === 'income' ? acc.current_balance + parsedAmount : acc.current_balance - parsedAmount;
+                await supabase.from('bank_accounts').update({ current_balance: newBal }).eq('id', account_id);
             }
-        })();
+        }
 
         res.status(201).json({ success: true, message: 'Transação registrada.', data: { id: txId } });
     } catch (error) {
@@ -229,11 +232,10 @@ router.post('/transactions', (req, res) => {
  * PUT /api/finance/transactions/:id/pay
  * Mark transaction as completed (paid/received) or partially paid
  */
-router.put('/transactions/:id/pay', (req, res) => {
+router.put('/transactions/:id/pay', async (req, res) => {
     try {
         const { payment_method, payment_date, amount, account_id } = req.body;
-        const db = getDatabase();
-        const tx = db.prepare("SELECT * FROM transactions WHERE id = ?").get(req.params.id);
+        const { data: tx } = await supabase.from('transactions').select('*').eq('id', req.params.id).maybeSingle();
         
         if (!tx) return res.status(404).json({ success: false, message: 'Transação não encontrada.' });
         
@@ -245,36 +247,34 @@ router.put('/transactions/:id/pay', (req, res) => {
         const payAmount = amount ? parseFloat(amount) : remaining;
 
         if (payAmount <= 0) return res.status(400).json({ success: false, message: 'Valor inválido.' });
-        if (payAmount > remaining) return res.status(400).json({ success: false, message: 'O valor pago excede o saldo devedor.' });
+        if (payAmount > remaining + 0.01) return res.status(400).json({ success: false, message: 'O valor pago excede o saldo devedor.' });
 
         const newPaidAmount = tx.paid_amount + payAmount;
-        const newStatus = newPaidAmount >= tx.amount ? 'completed' : 'partial';
+        const newStatus = (newPaidAmount + 0.01) >= tx.amount ? 'completed' : 'partial';
 
-        db.transaction(() => {
-            // Insere no histórico de pagamentos
-            db.prepare(`
-                INSERT INTO transaction_payments (transaction_id, account_id, amount, payment_method, payment_date)
-                VALUES (?, ?, ?, ?, ?)
-            `).run(tx.id, account_id || null, payAmount, payment_method || 'cash', payDate);
+        // Insere no histórico de pagamentos
+        await supabase.from('transaction_payments').insert({
+            transaction_id: tx.id, account_id: account_id || null, amount: payAmount, payment_method: payment_method || 'cash', payment_date: payDate
+        });
 
-            // Atualiza a transação
-            db.prepare(`
-                UPDATE transactions 
-                SET status = ?, paid_amount = ?, payment_date = ?, payment_method = ?
-                WHERE id = ?
-            `).run(newStatus, newPaidAmount, payDate, payment_method || 'cash', tx.id);
+        // Atualiza a transação
+        await supabase.from('transactions').update({
+            status: newStatus, paid_amount: newPaidAmount, payment_date: payDate, payment_method: payment_method || 'cash'
+        }).eq('id', tx.id);
 
-            // Atualiza o saldo da conta
-            if (account_id) {
-                const op = tx.type === 'income' ? '+' : '-';
-                db.prepare(`UPDATE bank_accounts SET current_balance = current_balance ${op} ? WHERE id = ?`).run(payAmount, account_id);
+        // Atualiza o saldo da conta
+        if (account_id) {
+            const { data: acc } = await supabase.from('bank_accounts').select('current_balance').eq('id', account_id).single();
+            if (acc) {
+                const newBal = tx.type === 'income' ? acc.current_balance + payAmount : acc.current_balance - payAmount;
+                await supabase.from('bank_accounts').update({ current_balance: newBal }).eq('id', account_id);
             }
-        })();
+        }
 
         res.json({ success: true, message: tx.type === 'income' ? 'Recebimento confirmado!' : 'Pagamento confirmado!' });
     } catch (error) {
         console.error('Erro ao baixar transacao:', error);
-        res.status(500).json({ success: false, message: 'Erro ao atualizar transa\u00e7\u00e3o.' });
+        res.status(500).json({ success: false, message: 'Erro ao atualizar transação.' });
     }
 });
 
@@ -282,19 +282,21 @@ router.put('/transactions/:id/pay', (req, res) => {
  * PUT /api/finance/transactions/:id
  * Update transaction details
  */
-router.put('/transactions/:id', (req, res) => {
+router.put('/transactions/:id', async (req, res) => {
     try {
         const { description, category_id, due_date, notes, barcode } = req.body;
-        const db = getDatabase();
-        const tx = db.prepare("SELECT * FROM transactions WHERE id = ?").get(req.params.id);
+        const { data: tx } = await supabase.from('transactions').select('*').eq('id', req.params.id).maybeSingle();
         
         if (!tx) return res.status(404).json({ success: false, message: 'Transação não encontrada.' });
         
-        db.prepare(`
-            UPDATE transactions 
-            SET description = ?, category_id = ?, due_date = ?, notes = ?, barcode = ?, updated_at = datetime('now','localtime')
-            WHERE id = ?
-        `).run(description || tx.description, category_id || tx.category_id, due_date || tx.due_date, notes !== undefined ? notes : tx.notes, barcode !== undefined ? barcode : tx.barcode, tx.id);
+        await supabase.from('transactions').update({
+            description: description || tx.description,
+            category_id: category_id || tx.category_id,
+            due_date: due_date || tx.due_date,
+            notes: notes !== undefined ? notes : tx.notes,
+            barcode: barcode !== undefined ? barcode : tx.barcode,
+            updated_at: new Date().toISOString()
+        }).eq('id', tx.id);
 
         res.json({ success: true, message: 'Transação atualizada com sucesso!' });
     } catch (error) {
@@ -307,27 +309,49 @@ router.put('/transactions/:id', (req, res) => {
  * POST /api/finance/transactions/:id/upload
  * Upload an attachment
  */
-router.post('/transactions/:id/upload', upload.single('attachment'), (req, res) => {
+router.post('/transactions/:id/upload', upload.single('attachment'), async (req, res) => {
     try {
         if (!req.file) return res.status(400).json({ success: false, message: 'Nenhum arquivo enviado.' });
 
-        const db = getDatabase();
-        const tx = db.prepare("SELECT * FROM transactions WHERE id = ?").get(req.params.id);
+        const { data: tx } = await supabase.from('transactions').select('*').eq('id', req.params.id).maybeSingle();
         if (!tx) return res.status(404).json({ success: false, message: 'Transação não encontrada.' });
 
-        const relativePath = '/uploads/finance/' + req.file.filename;
+        const ext = path.extname(req.file.originalname).toLowerCase();
+        const fileName = `tx_${tx.id}_${Date.now()}${ext}`;
 
-        // Apagar o anexo anterior se existir
+        // Tentar excluir anexo antigo (seja local ou do bucket)
         if (tx.attachment_path) {
-            const oldPath = path.join(__dirname, '../../public', tx.attachment_path);
-            if (fs.existsSync(oldPath)) {
-                fs.unlinkSync(oldPath);
+            if (tx.attachment_path.startsWith('http')) {
+                // Arquivo está no Supabase
+                try {
+                    const urlObj = new URL(tx.attachment_path);
+                    const pathParts = urlObj.pathname.split('/');
+                    const oldFileName = pathParts[pathParts.length - 1];
+                    await supabase.storage.from('uploads').remove([oldFileName]);
+                } catch (e) { /* ignore parse error */ }
+            } else {
+                // Arquivo local (caminho antigo)
+                const oldPath = path.join(__dirname, '../../public', tx.attachment_path);
+                if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
             }
         }
 
-        db.prepare("UPDATE transactions SET attachment_path = ? WHERE id = ?").run(relativePath, tx.id);
+        // Fazer upload do buffer direto para o Supabase Storage
+        const { error: uploadError } = await supabase.storage.from('uploads')
+            .upload(fileName, req.file.buffer, {
+                contentType: req.file.mimetype,
+                upsert: true
+            });
 
-        res.json({ success: true, message: 'Anexo salvo com sucesso!', attachment_path: relativePath });
+        if (uploadError) throw uploadError;
+
+        // Pegar URL pública da imagem
+        const { data: urlData } = supabase.storage.from('uploads').getPublicUrl(fileName);
+        const publicUrl = urlData.publicUrl;
+
+        await supabase.from('transactions').update({ attachment_path: publicUrl }).eq('id', tx.id);
+
+        res.json({ success: true, message: 'Anexo salvo com sucesso!', attachment_path: publicUrl });
     } catch (error) {
         console.error('Erro no upload:', error);
         res.status(500).json({ success: false, message: 'Erro ao salvar anexo.' });
@@ -338,25 +362,22 @@ router.post('/transactions/:id/upload', upload.single('attachment'), (req, res) 
  * DELETE /api/finance/transactions/:id
  * Delete a transaction
  */
-router.delete('/transactions/:id', (req, res) => {
+router.delete('/transactions/:id', async (req, res) => {
     try {
-        const db = getDatabase();
-        
-        db.transaction(() => {
-            const tx = db.prepare("SELECT type FROM transactions WHERE id = ?").get(req.params.id);
-            if (tx) {
-                // Reverter saldos das contas bancárias
-                const payments = db.prepare("SELECT account_id, amount FROM transaction_payments WHERE transaction_id = ?").all(req.params.id);
-                for (const p of payments) {
-                    if (p.account_id) {
-                        const op = tx.type === 'income' ? '-' : '+';
-                        db.prepare(`UPDATE bank_accounts SET current_balance = current_balance ${op} ? WHERE id = ?`).run(p.amount, p.account_id);
+        const { data: tx } = await supabase.from('transactions').select('type').eq('id', req.params.id).maybeSingle();
+        if (tx) {
+            const { data: payments } = await supabase.from('transaction_payments').select('account_id, amount').eq('transaction_id', req.params.id);
+            for (const p of (payments || [])) {
+                if (p.account_id) {
+                    const { data: acc } = await supabase.from('bank_accounts').select('current_balance').eq('id', p.account_id).single();
+                    if (acc) {
+                        const newBal = tx.type === 'income' ? acc.current_balance - p.amount : acc.current_balance + p.amount;
+                        await supabase.from('bank_accounts').update({ current_balance: newBal }).eq('id', p.account_id);
                     }
                 }
             }
-            db.prepare("DELETE FROM transactions WHERE id = ?").run(req.params.id);
-        })();
-
+        }
+        await supabase.from('transactions').delete().eq('id', req.params.id);
         res.json({ success: true, message: 'Excluído com sucesso.' });
     } catch (error) {
         console.error('Erro ao excluir transacao:', error);
@@ -372,17 +393,22 @@ router.delete('/transactions/:id', (req, res) => {
  * GET /api/finance/recurring
  * List recurring transactions
  */
-router.get('/recurring', (req, res) => {
+router.get('/recurring', async (req, res) => {
     try {
-        const db = getDatabase();
-        const recurring = db.prepare(`
-            SELECT r.*, c.name as category_name, c.color as category_color, a.name as account_name
-            FROM recurring_transactions r
-            LEFT JOIN transaction_categories c ON r.category_id = c.id
-            LEFT JOIN bank_accounts a ON r.account_id = a.id
-            ORDER BY r.day_of_month ASC
-        `).all();
-        res.json({ success: true, data: recurring });
+        const { data: recurring, error } = await supabase
+            .from('recurring_transactions')
+            .select('*, transaction_categories(name, color), bank_accounts(name)')
+            .order('day_of_month', { ascending: true });
+        if (error) throw error;
+        
+        const recFormat = (recurring || []).map(r => ({
+            ...r,
+            category_name: r.transaction_categories?.name,
+            category_color: r.transaction_categories?.color,
+            account_name: r.bank_accounts?.name
+        }));
+        
+        res.json({ success: true, data: recFormat });
     } catch (error) {
         console.error('Erro ao listar recorrências:', error);
         res.status(500).json({ success: false, message: 'Erro ao listar recorrências.' });
@@ -393,7 +419,7 @@ router.get('/recurring', (req, res) => {
  * POST /api/finance/recurring
  * Create new recurring transaction
  */
-router.post('/recurring', (req, res) => {
+router.post('/recurring', async (req, res) => {
     try {
         const { type, category_id, account_id, description, amount, day_of_month, notes } = req.body;
         
@@ -401,21 +427,12 @@ router.post('/recurring', (req, res) => {
             return res.status(400).json({ success: false, message: 'Preencha todos os campos obrigatórios.' });
         }
 
-        const db = getDatabase();
-        const info = db.prepare(`
-            INSERT INTO recurring_transactions (type, category_id, account_id, description, amount, day_of_month, notes, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'active')
-        `).run(
-            type, 
-            category_id || null, 
-            account_id || null, 
-            description.trim(), 
-            amount, 
-            day_of_month, 
-            notes ? notes.trim() : ''
-        );
+        const { data: info, error } = await supabase.from('recurring_transactions').insert({
+            type, category_id: category_id || null, account_id: account_id || null, description: description.trim(), amount, day_of_month, notes: notes ? notes.trim() : '', status: 'active'
+        }).select('id').single();
+        if (error) throw error;
 
-        res.status(201).json({ success: true, message: 'Transação recorrente criada!', data: { id: info.lastInsertRowid } });
+        res.status(201).json({ success: true, message: 'Transação recorrente criada!', data: { id: info.id } });
     } catch (error) {
         console.error('Erro ao criar recorrência:', error);
         res.status(500).json({ success: false, message: 'Erro ao criar transação recorrente.' });
@@ -426,29 +443,16 @@ router.post('/recurring', (req, res) => {
  * PUT /api/finance/recurring/:id
  * Update recurring transaction
  */
-router.put('/recurring/:id', (req, res) => {
+router.put('/recurring/:id', async (req, res) => {
     try {
         const { type, category_id, account_id, description, amount, day_of_month, notes, status } = req.body;
-        const db = getDatabase();
         
-        const existing = db.prepare('SELECT id FROM recurring_transactions WHERE id = ?').get(req.params.id);
+        const { data: existing } = await supabase.from('recurring_transactions').select('id').eq('id', req.params.id).maybeSingle();
         if (!existing) return res.status(404).json({ success: false, message: 'Recorrência não encontrada.' });
 
-        db.prepare(`
-            UPDATE recurring_transactions 
-            SET type = ?, category_id = ?, account_id = ?, description = ?, amount = ?, day_of_month = ?, notes = ?, status = ?, updated_at = datetime('now','localtime')
-            WHERE id = ?
-        `).run(
-            type, 
-            category_id || null, 
-            account_id || null, 
-            description.trim(), 
-            amount, 
-            day_of_month, 
-            notes ? notes.trim() : '', 
-            status || 'active',
-            req.params.id
-        );
+        await supabase.from('recurring_transactions').update({
+            type, category_id: category_id || null, account_id: account_id || null, description: description.trim(), amount, day_of_month, notes: notes ? notes.trim() : '', status: status || 'active', updated_at: new Date().toISOString()
+        }).eq('id', req.params.id);
 
         res.json({ success: true, message: 'Recorrência atualizada com sucesso.' });
     } catch (error) {
@@ -461,13 +465,12 @@ router.put('/recurring/:id', (req, res) => {
  * DELETE /api/finance/recurring/:id
  * Delete recurring transaction
  */
-router.delete('/recurring/:id', (req, res) => {
+router.delete('/recurring/:id', async (req, res) => {
     try {
-        const db = getDatabase();
-        const existing = db.prepare('SELECT id FROM recurring_transactions WHERE id = ?').get(req.params.id);
+        const { data: existing } = await supabase.from('recurring_transactions').select('id').eq('id', req.params.id).maybeSingle();
         if (!existing) return res.status(404).json({ success: false, message: 'Recorrência não encontrada.' });
 
-        db.prepare('DELETE FROM recurring_transactions WHERE id = ?').run(req.params.id);
+        await supabase.from('recurring_transactions').delete().eq('id', req.params.id);
         res.json({ success: true, message: 'Recorrência excluída.' });
     } catch (error) {
         console.error('Erro ao excluir recorrência:', error);

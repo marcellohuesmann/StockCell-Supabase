@@ -1,5 +1,5 @@
 const express = require('express');
-const { getDatabase } = require('../database/init');
+const supabase = require('../database/supabase');
 const { requireAuth, requireAdmin } = require('../middleware/auth');
 const router = express.Router();
 
@@ -9,34 +9,34 @@ router.use(requireAuth);
  * GET /api/logs
  * Retorna os logs de atividade
  */
-router.get('/', requireAdmin, (req, res) => {
+router.get('/', requireAdmin, async (req, res) => {
     try {
-        const db = getDatabase();
         const { date, user_id, action } = req.query;
-        let query = `
-            SELECT l.*, u.username, u.full_name 
-            FROM activity_log l
-            LEFT JOIN users u ON l.user_id = u.id
-            WHERE 1=1
-        `;
-        const params = [];
-
+        let query = supabase.from('activity_log').select('*, users(username, full_name)');
+        
         if (date) {
-            query += " AND DATE(l.created_at) = ?";
-            params.push(date);
+            const nextDay = new Date(date);
+            nextDay.setDate(nextDay.getDate() + 1);
+            query = query.gte('created_at', date).lt('created_at', nextDay.toISOString().split('T')[0]);
         }
         if (user_id) {
-            query += " AND l.user_id = ?";
-            params.push(user_id);
+            query = query.eq('user_id', user_id);
         }
         if (action) {
-            query += " AND l.action = ?";
-            params.push(action);
+            query = query.eq('action', action);
         }
+        
+        query = query.order('created_at', { ascending: false }).limit(200);
 
-        query += " ORDER BY l.created_at DESC LIMIT 200";
-
-        const logs = db.prepare(query).all(...params);
+        const { data: logsRaw, error } = await query;
+        if (error) throw error;
+        
+        const logs = (logsRaw || []).map(l => ({
+            ...l,
+            username: l.users?.username,
+            full_name: l.users?.full_name
+        }));
+        
         res.json({ success: true, data: logs });
     } catch (e) {
         console.error('Logs Error:', e);

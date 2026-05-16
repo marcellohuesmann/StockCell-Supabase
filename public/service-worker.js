@@ -85,8 +85,9 @@ self.addEventListener('fetch', (event) => {
                 fetch(request, { signal: controller.signal }).then((networkResponse) => {
                     clearTimeout(timeoutId);
                     if (networkResponse && networkResponse.ok && !request.url.startsWith('chrome-extension')) {
+                        const responseToCache = networkResponse.clone();
                         caches.open(CACHE_NAME).then((cache) => {
-                            cache.put(request, networkResponse.clone());
+                            cache.put(request, responseToCache);
                         });
                     }
                     resolve(networkResponse);

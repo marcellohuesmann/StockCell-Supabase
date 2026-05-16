@@ -1,24 +1,38 @@
 const express = require('express');
 const router = express.Router();
 const nodemailer = require('nodemailer');
-const { getDatabase } = require('../database/init');
+const supabase = require('../database/supabase');
 const { requireAuth } = require('../middleware/auth');
 
 router.use(requireAuth);
 
 // GET /api/os - Listar todas as ordens de serviço
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
     try {
-        const db = getDatabase();
-        const osList = db.prepare(`
-            SELECT so.*, c.name as customer_name, c.phone as customer_phone, c.email as customer_email,
-            (SELECT COUNT(*) FROM os_items oi 
-             JOIN products p ON oi.product_id = p.id 
-             WHERE oi.os_id = so.id AND oi.item_type = 'product' AND p.current_stock < oi.quantity AND p.is_service = 0) as missing_parts_count
-            FROM service_orders so
-            LEFT JOIN customers c ON so.customer_id = c.id
-            ORDER BY so.created_at DESC
-        `).all();
+        const { data: osListRaw, error } = await supabase.from('service_orders').select('*, customers(name, phone, email)').order('created_at', { ascending: false });
+        if (error) throw error;
+        
+        const osIds = (osListRaw || []).map(os => os.id);
+        let itemsMap = {};
+        if (osIds.length > 0) {
+            const { data: osItemsRaw } = await supabase.from('os_items').select('*, products(current_stock, is_service)').in('os_id', osIds).eq('item_type', 'product');
+            if (osItemsRaw) {
+                osItemsRaw.forEach(item => {
+                    if (item.products && item.products.is_service === false && item.products.current_stock < item.quantity) {
+                        itemsMap[item.os_id] = (itemsMap[item.os_id] || 0) + 1;
+                    }
+                });
+            }
+        }
+        
+        const osList = (osListRaw || []).map(os => ({
+            ...os,
+            customer_name: os.customers?.name,
+            customer_phone: os.customers?.phone,
+            customer_email: os.customers?.email,
+            missing_parts_count: itemsMap[os.id] || 0
+        }));
+
         res.json({ success: true, data: osList });
     } catch (error) {
         console.error('Erro ao listar O.S.:', error);
@@ -27,34 +41,22 @@ router.get('/', (req, res) => {
 });
 
 // GET /api/os/:id - Obter detalhes de uma O.S. com itens
-router.get('/:id', (req, res) => {
+router.get('/:id', async (req, res) => {
     try {
-        const db = getDatabase();
-        const os = db.prepare(`
-            SELECT so.*, c.name as customer_name, c.phone as customer_phone, c.email as customer_email
-            FROM service_orders so
-            LEFT JOIN customers c ON so.customer_id = c.id
-            WHERE so.id = ?
-        `).get(req.params.id);
-
+        const { data: os } = await supabase.from('service_orders').select('*, customers(name, phone, email)').eq('id', req.params.id).maybeSingle();
         if (!os) return res.status(404).json({ success: false, message: 'O.S. não encontrada.' });
 
-        const items = db.prepare(`
-            SELECT oi.*, p.name as product_name
-            FROM os_items oi
-            LEFT JOIN products p ON oi.product_id = p.id
-            WHERE oi.os_id = ?
-        `).all(os.id);
+        os.customer_name = os.customers?.name;
+        os.customer_phone = os.customers?.phone;
+        os.customer_email = os.customers?.email;
 
-        const history = db.prepare(`
-            SELECT description, created_at
-            FROM activity_log
-            WHERE entity = 'os' AND entity_id = ?
-            ORDER BY created_at ASC
-        `).all(os.id);
+        const { data: itemsRaw } = await supabase.from('os_items').select('*, products(name)').eq('os_id', os.id);
+        const items = (itemsRaw || []).map(i => ({ ...i, product_name: i.products?.name }));
+
+        const { data: history } = await supabase.from('activity_log').select('description, created_at').eq('entity', 'os').eq('entity_id', os.id).order('created_at', { ascending: true });
 
         os.items = items;
-        os.history = history;
+        os.history = history || [];
         res.json({ success: true, data: os });
     } catch (error) {
         console.error('Erro ao buscar O.S.:', error);
@@ -63,24 +65,24 @@ router.get('/:id', (req, res) => {
 });
 
 // POST /api/os - Criar uma nova O.S.
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
     try {
-        const db = getDatabase();
         const { customer_id, device_model, device_serial, device_password, reported_defect, technical_report } = req.body;
 
         if (!device_model || !reported_defect) {
             return res.status(400).json({ success: false, message: 'Modelo do aparelho e defeito relatado são obrigatórios.' });
         }
 
-        const info = db.prepare(`
-            INSERT INTO service_orders (customer_id, device_model, device_serial, device_password, reported_defect, technical_report, created_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        `).run(customer_id || null, device_model, device_serial || null, device_password || null, reported_defect, technical_report || null, req.session.userId);
+        const { data: info, error } = await supabase.from('service_orders').insert({
+            customer_id: customer_id || null, device_model, device_serial: device_serial || null, device_password: device_password || null, reported_defect, technical_report: technical_report || null, created_by: req.session.userId
+        }).select('id').single();
+        if (error) throw error;
 
-        db.prepare(`INSERT INTO activity_log (user_id, action, entity, entity_id, description) VALUES (?, 'create', 'os', ?, ?)`)
-            .run(req.session.userId, info.lastInsertRowid, `Ordem de Serviço #${info.lastInsertRowid} criada`);
+        await supabase.from('activity_log').insert({
+            user_id: req.session.userId, action: 'create', entity: 'os', entity_id: info.id, description: `Ordem de Serviço #${info.id} criada`
+        });
 
-        res.json({ success: true, data: { id: info.lastInsertRowid }, message: 'O.S. criada com sucesso!' });
+        res.json({ success: true, data: { id: info.id }, message: 'O.S. criada com sucesso!' });
     } catch (error) {
         console.error('Erro ao criar O.S.:', error);
         res.status(500).json({ success: false, message: 'Erro ao criar ordem de serviço.' });
@@ -88,22 +90,23 @@ router.post('/', (req, res) => {
 });
 
 // PUT /api/os/:id - Atualizar dados da O.S.
-router.put('/:id', (req, res) => {
+router.put('/:id', async (req, res) => {
     try {
-        const db = getDatabase();
         const { customer_id, device_model, device_serial, device_password, reported_defect, technical_report } = req.body;
+        
+        const { data: existingOs } = await supabase.from('service_orders').select('*').eq('id', req.params.id).maybeSingle();
+        if (!existingOs) return res.status(404).json({ success: false, message: 'O.S. não encontrada.' });
 
-        db.prepare(`
-            UPDATE service_orders SET
-                customer_id = COALESCE(?, customer_id),
-                device_model = COALESCE(?, device_model),
-                device_serial = COALESCE(?, device_serial),
-                device_password = COALESCE(?, device_password),
-                reported_defect = COALESCE(?, reported_defect),
-                technical_report = COALESCE(?, technical_report),
-                updated_at = datetime('now','localtime')
-            WHERE id = ?
-        `).run(customer_id, device_model, device_serial, device_password, reported_defect, technical_report, req.params.id);
+        const { error } = await supabase.from('service_orders').update({
+            customer_id: customer_id || existingOs.customer_id,
+            device_model: device_model || existingOs.device_model,
+            device_serial: device_serial || existingOs.device_serial,
+            device_password: device_password || existingOs.device_password,
+            reported_defect: reported_defect || existingOs.reported_defect,
+            technical_report: technical_report || existingOs.technical_report,
+            updated_at: new Date().toISOString()
+        }).eq('id', req.params.id);
+        if (error) throw error;
 
         res.json({ success: true, message: 'O.S. atualizada com sucesso!' });
     } catch (error) {
@@ -113,96 +116,76 @@ router.put('/:id', (req, res) => {
 });
 
 // PUT /api/os/:id/status - Atualizar status da O.S. (Drag in Kanban)
-router.put('/:id/status', (req, res) => {
+router.put('/:id/status', async (req, res) => {
     try {
-        const db = getDatabase();
         const { status, serials } = req.body;
         const osId = req.params.id;
         const validStatuses = ['budgeting','waiting_parts','approved','in_repair','ready','delivered','cancelled'];
         
-        if (!validStatuses.includes(status)) {
-            return res.status(400).json({ success: false, message: 'Status inválido.' });
-        }
+        if (!validStatuses.includes(status)) return res.status(400).json({ success: false, message: 'Status inválido.' });
 
-        const os = db.prepare('SELECT status FROM service_orders WHERE id = ?').get(osId);
+        const { data: os } = await supabase.from('service_orders').select('status').eq('id', osId).maybeSingle();
         if (!os) return res.status(404).json({ success: false, message: 'O.S. não encontrada.' });
         
         const oldStatus = os.status;
 
-        // Se moveu para 'approved' vindo de 'budgeting' ou 'waiting_parts'
         if (status === 'approved' && ['budgeting', 'waiting_parts'].includes(oldStatus)) {
-            const items = db.prepare(`
-                SELECT oi.*, p.track_serial, p.current_stock, p.name 
-                FROM os_items oi 
-                JOIN products p ON oi.product_id = p.id 
-                WHERE oi.os_id = ? AND oi.item_type = 'product'
-            `).all(osId);
+            const { data: itemsRaw } = await supabase.from('os_items').select('*, products(track_serial, current_stock, name)').eq('os_id', osId).eq('item_type', 'product');
+            const items = (itemsRaw || []).map(i => ({ ...i, track_serial: i.products?.track_serial, current_stock: i.products?.current_stock, name: i.products?.name }));
 
-            db.transaction(() => {
-                for (let item of items) {
-                    if (item.current_stock < item.quantity) {
-                        throw new Error(`Estoque insuficiente para a peça: ${item.name}`);
-                    }
-                    if (item.track_serial) {
-                        const providedSerials = (serials && serials[item.id]) || [];
-                        if (providedSerials.length !== item.quantity) {
-                            throw new Error(`A peça "${item.name}" exige ${item.quantity} números de série válidos.`);
-                        }
-                        
-                        for (let s of providedSerials) {
-                            const dbSerial = db.prepare('SELECT status FROM product_serials WHERE product_id = ? AND serial_number = ?').get(item.product_id, s);
-                            if (!dbSerial || dbSerial.status !== 'available') {
-                                throw new Error(`O serial ${s} para "${item.name}" não está disponível.`);
-                            }
-                            db.prepare("UPDATE product_serials SET status = 'sold' WHERE product_id = ? AND serial_number = ?").run(item.product_id, s);
-                        }
-                        db.prepare('UPDATE os_items SET serial_number = ? WHERE id = ?').run(providedSerials.join(','), item.id);
-                    }
+            for (let item of items) {
+                if (item.current_stock < item.quantity) throw new Error(`Estoque insuficiente para a peça: ${item.name}`);
+                
+                if (item.track_serial) {
+                    const providedSerials = (serials && serials[item.id]) || [];
+                    if (providedSerials.length !== item.quantity) throw new Error(`A peça "${item.name}" exige ${item.quantity} números de série válidos.`);
                     
-                    db.prepare('UPDATE products SET current_stock = current_stock - ? WHERE id = ?').run(item.quantity, item.product_id);
-                    const afterBal = item.current_stock - item.quantity;
-                    db.prepare(`
-                        INSERT INTO stock_movements (product_id, user_id, type, quantity, balance_after, reason, reference_id)
-                        VALUES (?, ?, 'exit', ?, ?, ?, ?)
-                    `).run(item.product_id, req.session.userId, item.quantity, afterBal, `Uso em O.S. #${osId}`, osId);
-                }
-                db.prepare(`UPDATE service_orders SET status = ?, updated_at = datetime('now','localtime') WHERE id = ?`).run(status, osId);
-            })();
-        } 
-        // Se cancelou uma OS já aprovada, estorna o estoque
-        else if (status === 'cancelled' && ['approved', 'in_repair', 'ready', 'delivered'].includes(oldStatus)) {
-            const items = db.prepare(`
-                SELECT oi.*, p.track_serial, p.current_stock 
-                FROM os_items oi 
-                JOIN products p ON oi.product_id = p.id 
-                WHERE oi.os_id = ? AND oi.item_type = 'product'
-            `).all(osId);
-
-            db.transaction(() => {
-                for (let item of items) {
-                    if (item.track_serial && item.serial_number) {
-                        const usedSerials = item.serial_number.split(',');
-                        for (let s of usedSerials) {
-                            db.prepare("UPDATE product_serials SET status = 'available' WHERE product_id = ? AND serial_number = ?").run(item.product_id, s);
-                        }
-                        db.prepare('UPDATE os_items SET serial_number = NULL WHERE id = ?').run(item.id);
+                    for (let s of providedSerials) {
+                        const { data: dbSerial } = await supabase.from('product_serials').select('status').eq('product_id', item.product_id).eq('serial_number', s).maybeSingle();
+                        if (!dbSerial || dbSerial.status !== 'available') throw new Error(`O serial ${s} para "${item.name}" não está disponível.`);
+                        
+                        await supabase.from('product_serials').update({ status: 'sold' }).eq('product_id', item.product_id).eq('serial_number', s);
                     }
-                    db.prepare('UPDATE products SET current_stock = current_stock + ? WHERE id = ?').run(item.quantity, item.product_id);
-                    const currentProd = db.prepare('SELECT current_stock FROM products WHERE id = ?').get(item.product_id);
-                    db.prepare(`
-                        INSERT INTO stock_movements (product_id, user_id, type, quantity, balance_after, reason, reference_id)
-                        VALUES (?, ?, 'entry', ?, ?, ?, ?)
-                    `).run(item.product_id, req.session.userId, item.quantity, currentProd.current_stock, `Estorno OS #${osId} Cancelada`, osId);
+                    await supabase.from('os_items').update({ serial_number: providedSerials.join(',') }).eq('id', item.id);
                 }
-                db.prepare(`UPDATE service_orders SET status = ?, updated_at = datetime('now','localtime') WHERE id = ?`).run(status, osId);
-            })();
+                
+                const afterBal = item.current_stock - item.quantity;
+                await supabase.from('products').update({ current_stock: afterBal }).eq('id', item.product_id);
+                
+                await supabase.from('stock_movements').insert({
+                    product_id: item.product_id, user_id: req.session.userId, type: 'exit', quantity: item.quantity, balance_after: afterBal, reason: `Uso em O.S. #${osId}`, reference_id: osId
+                });
+            }
+            await supabase.from('service_orders').update({ status, updated_at: new Date().toISOString() }).eq('id', osId);
+
+        } else if (status === 'cancelled' && ['approved', 'in_repair', 'ready', 'delivered'].includes(oldStatus)) {
+            const { data: itemsRaw } = await supabase.from('os_items').select('*, products(track_serial, current_stock)').eq('os_id', osId).eq('item_type', 'product');
+            const items = (itemsRaw || []).map(i => ({ ...i, track_serial: i.products?.track_serial, current_stock: i.products?.current_stock }));
+
+            for (let item of items) {
+                if (item.track_serial && item.serial_number) {
+                    const usedSerials = item.serial_number.split(',');
+                    for (let s of usedSerials) {
+                        await supabase.from('product_serials').update({ status: 'available' }).eq('product_id', item.product_id).eq('serial_number', s);
+                    }
+                    await supabase.from('os_items').update({ serial_number: null }).eq('id', item.id);
+                }
+                
+                const newStock = item.current_stock + item.quantity;
+                await supabase.from('products').update({ current_stock: newStock }).eq('id', item.product_id);
+                
+                await supabase.from('stock_movements').insert({
+                    product_id: item.product_id, user_id: req.session.userId, type: 'entry', quantity: item.quantity, balance_after: newStock, reason: `Estorno OS #${osId} Cancelada`, reference_id: osId
+                });
+            }
+            await supabase.from('service_orders').update({ status, updated_at: new Date().toISOString() }).eq('id', osId);
         } else {
-            // Transição normal sem impacto em estoque
-            db.prepare(`UPDATE service_orders SET status = ?, updated_at = datetime('now','localtime') WHERE id = ?`).run(status, osId);
+            await supabase.from('service_orders').update({ status, updated_at: new Date().toISOString() }).eq('id', osId);
         }
 
-        db.prepare(`INSERT INTO activity_log (user_id, action, entity, entity_id, description) VALUES (?, 'update', 'os', ?, ?)`)
-            .run(req.session.userId, req.params.id, `Status da O.S. #${req.params.id} alterado para ${status}`);
+        await supabase.from('activity_log').insert({
+            user_id: req.session.userId, action: 'update', entity: 'os', entity_id: osId, description: `Status da O.S. #${osId} alterado para ${status}`
+        });
 
         res.json({ success: true, message: 'Status atualizado com sucesso!' });
     } catch (error) {
@@ -212,40 +195,25 @@ router.put('/:id/status', (req, res) => {
 });
 
 // POST /api/os/:id/items - Adicionar item ao orçamento da O.S.
-router.post('/:id/items', (req, res) => {
+router.post('/:id/items', async (req, res) => {
     try {
-        const db = getDatabase();
         const { item_type, product_id, description, quantity, unit_price } = req.body;
-        
-        if (!item_type || !description || quantity < 1 || unit_price < 0) {
-            return res.status(400).json({ success: false, message: 'Dados do item inválidos.' });
-        }
+        if (!item_type || !description || quantity < 1 || unit_price < 0) return res.status(400).json({ success: false, message: 'Dados do item inválidos.' });
 
         const total_price = quantity * unit_price;
 
-        // Transaction to add item and update O.S. totals
-        db.transaction(() => {
-            db.prepare(`
-                INSERT INTO os_items (os_id, item_type, product_id, description, quantity, unit_price, total_price)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            `).run(req.params.id, item_type, product_id || null, description, quantity, unit_price, total_price);
+        await supabase.from('os_items').insert({
+            os_id: req.params.id, item_type, product_id: product_id || null, description, quantity, unit_price, total_price
+        });
 
-            // Recalculate totals
-            const totals = db.prepare(`
-                SELECT 
-                    SUM(CASE WHEN item_type = 'product' THEN total_price ELSE 0 END) as parts,
-                    SUM(CASE WHEN item_type = 'service' THEN total_price ELSE 0 END) as labor
-                FROM os_items WHERE os_id = ?
-            `).get(req.params.id);
+        const { data: itemsRaw } = await supabase.from('os_items').select('item_type, total_price').eq('os_id', req.params.id);
+        const parts = (itemsRaw || []).filter(i => i.item_type === 'product').reduce((s, i) => s + i.total_price, 0);
+        const labor = (itemsRaw || []).filter(i => i.item_type === 'service').reduce((s, i) => s + i.total_price, 0);
+        const total = parts + labor;
 
-            const total = (totals.parts || 0) + (totals.labor || 0);
-
-            db.prepare(`
-                UPDATE service_orders 
-                SET total_parts = ?, total_labor = ?, total_amount = ?, updated_at = datetime('now','localtime')
-                WHERE id = ?
-            `).run(totals.parts || 0, totals.labor || 0, total, req.params.id);
-        })();
+        await supabase.from('service_orders').update({
+            total_parts: parts, total_labor: labor, total_amount: total, updated_at: new Date().toISOString()
+        }).eq('id', req.params.id);
 
         res.json({ success: true, message: 'Item adicionado ao orçamento.' });
     } catch (error) {
@@ -255,32 +223,21 @@ router.post('/:id/items', (req, res) => {
 });
 
 // DELETE /api/os/items/:itemId - Remover item do orçamento
-router.delete('/items/:itemId', (req, res) => {
+router.delete('/items/:itemId', async (req, res) => {
     try {
-        const db = getDatabase();
-        const item = db.prepare('SELECT os_id FROM os_items WHERE id = ?').get(req.params.itemId);
-        
+        const { data: item } = await supabase.from('os_items').select('os_id').eq('id', req.params.itemId).maybeSingle();
         if (!item) return res.status(404).json({ success: false, message: 'Item não encontrado.' });
 
-        db.transaction(() => {
-            db.prepare('DELETE FROM os_items WHERE id = ?').run(req.params.itemId);
+        await supabase.from('os_items').delete().eq('id', req.params.itemId);
 
-            // Recalculate totals
-            const totals = db.prepare(`
-                SELECT 
-                    SUM(CASE WHEN item_type = 'product' THEN total_price ELSE 0 END) as parts,
-                    SUM(CASE WHEN item_type = 'service' THEN total_price ELSE 0 END) as labor
-                FROM os_items WHERE os_id = ?
-            `).get(item.os_id);
+        const { data: itemsRaw } = await supabase.from('os_items').select('item_type, total_price').eq('os_id', item.os_id);
+        const parts = (itemsRaw || []).filter(i => i.item_type === 'product').reduce((s, i) => s + i.total_price, 0);
+        const labor = (itemsRaw || []).filter(i => i.item_type === 'service').reduce((s, i) => s + i.total_price, 0);
+        const total = parts + labor;
 
-            const total = (totals.parts || 0) + (totals.labor || 0);
-
-            db.prepare(`
-                UPDATE service_orders 
-                SET total_parts = ?, total_labor = ?, total_amount = ?, updated_at = datetime('now','localtime')
-                WHERE id = ?
-            `).run(totals.parts || 0, totals.labor || 0, total, item.os_id);
-        })();
+        await supabase.from('service_orders').update({
+            total_parts: parts, total_labor: labor, total_amount: total, updated_at: new Date().toISOString()
+        }).eq('id', item.os_id);
 
         res.json({ success: true, message: 'Item removido do orçamento.' });
     } catch (error) {
@@ -298,30 +255,17 @@ router.post('/:id/email', async (req, res) => {
         const db = getDatabase();
         const id = req.params.id;
 
-        // Fetch OS details
-        const os = db.prepare(`
-            SELECT so.*, c.name as customer_name, c.phone as customer_phone, c.email as customer_email
-            FROM service_orders so
-            LEFT JOIN customers c ON so.customer_id = c.id
-            WHERE so.id = ?
-        `).get(id);
-
+        const { data: os } = await supabase.from('service_orders').select('*, customers(name, phone, email)').eq('id', id).maybeSingle();
         if (!os) return res.status(404).json({ success: false, message: 'O.S. não encontrada.' });
+        os.customer_name = os.customers?.name;
 
-        const items = db.prepare(`
-            SELECT oi.*, p.name as product_name
-            FROM os_items oi
-            LEFT JOIN products p ON oi.product_id = p.id
-            WHERE oi.os_id = ?
-        `).all(id);
+        const { data: itemsRaw } = await supabase.from('os_items').select('*, products(name)').eq('os_id', id);
+        const items = (itemsRaw || []).map(i => ({ ...i, product_name: i.products?.name }));
 
-        // Fetch SMTP and Store Settings
         const keys = ['smtp_host', 'smtp_port', 'smtp_user', 'smtp_pass', 'store_name', 'store_logo'];
+        const { data: appSettingsRaw } = await supabase.from('app_settings').select('key, value').in('key', keys);
         const settings = {};
-        keys.forEach(k => {
-            const r = db.prepare("SELECT value FROM app_settings WHERE key = ?").get(k);
-            settings[k] = r ? r.value : '';
-        });
+        (appSettingsRaw || []).forEach(r => settings[r.key] = r.value);
 
         if (!settings.smtp_host || !settings.smtp_user || !settings.smtp_pass) {
             return res.status(400).json({ success: false, message: 'Configurações SMTP incompletas. Acesse as Configurações da Loja.' });

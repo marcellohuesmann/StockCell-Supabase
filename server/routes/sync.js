@@ -1,70 +1,55 @@
 const express = require('express');
-const { getDatabase } = require('../database/init');
+const supabase = require('../database/supabase');
 const { requireAuth } = require('../middleware/auth');
 const router = express.Router();
 router.use(requireAuth);
 
-/**
- * POST /api/sync/push-sale
- * Recebe uma venda criada offline (com UUID para deduplicação)
- */
-router.post('/push-sale', (req, res) => {
+router.post('/push-sale', async (req, res) => {
     try {
-        const db = getDatabase();
         const { uuid, items, payments, discount_amount, created_at, cash_received, cash_change } = req.body;
+        if (!uuid || !items || !items.length) return res.status(400).json({ success: false, message: 'Dados incompletos.' });
 
-        if (!uuid || !items || !items.length) {
-            return res.status(400).json({ success: false, message: 'Dados incompletos.' });
-        }
-
-        // Deduplication: check if UUID already exists
-        const existing = db.prepare("SELECT id FROM sales WHERE uuid = ?").get(uuid);
-        if (existing) {
-            return res.json({ success: true, message: 'Venda já sincronizada.', data: { id: existing.id } });
-        }
+        const { data: existing } = await supabase.from('sales').select('id').eq('uuid', uuid).maybeSingle();
+        if (existing) return res.json({ success: true, message: 'Venda já sincronizada.', data: { id: existing.id } });
 
         const subtotal = items.reduce((s, i) => s + (i.unit_price * i.quantity), 0);
         const total = Math.max(0, subtotal - (discount_amount || 0));
 
-        // Insert sale
         const dLoc = new Date();
         const pad = n => String(n).padStart(2,'0');
         const localTime = `${dLoc.getFullYear()}-${pad(dLoc.getMonth()+1)}-${pad(dLoc.getDate())} ${pad(dLoc.getHours())}:${pad(dLoc.getMinutes())}:${pad(dLoc.getSeconds())}`;
 
-        const saleInfo = db.prepare(`
-            INSERT INTO sales (user_id, subtotal, discount_amount, total, status, uuid, created_at, cash_received, cash_change)
-            VALUES (?, ?, ?, ?, 'completed', ?, ?, ?, ?)
-        `).run(req.session.userId, subtotal, discount_amount || 0, total, uuid, created_at || localTime, cash_received || 0, cash_change || 0);
-
-        const saleId = saleInfo.lastInsertRowid;
-
-        // Insert items + adjust stock
-        const insertItem = db.prepare(`INSERT INTO sale_items (sale_id, product_id, quantity, unit_price, discount, total) VALUES (?, ?, ?, ?, ?, ?)`);
-        const updateStock = db.prepare(`UPDATE products SET current_stock = MAX(0, current_stock - ?) WHERE id = ?`);
-        const insertMovement = db.prepare(`INSERT INTO stock_movements (product_id, user_id, type, quantity, balance_after, reason, reference_id) VALUES (?, ?, 'exit', ?, (SELECT MAX(0, current_stock) FROM products WHERE id = ?), 'Venda (sync offline)', ?)`);
+        const { data: saleInfo, error: saleErr } = await supabase.from('sales').insert({
+            user_id: req.session.userId, subtotal, discount_amount: discount_amount || 0, total, status: 'completed', uuid, created_at: created_at || localTime, cash_received: cash_received || 0, cash_change: cash_change || 0
+        }).select('id').single();
+        if (saleErr) throw saleErr;
+        const saleId = saleInfo.id;
 
         for (const item of items) {
             const itemTotal = item.unit_price * item.quantity;
-            insertItem.run(saleId, item.product_id, item.quantity, item.unit_price, item.discount || 0, itemTotal);
-            updateStock.run(item.quantity, item.product_id);
-            insertMovement.run(item.product_id, req.session.userId, item.quantity, item.product_id, saleId);
+            await supabase.from('sale_items').insert({
+                sale_id: saleId, product_id: item.product_id, quantity: item.quantity, unit_price: item.unit_price, discount: item.discount || 0, total: itemTotal
+            });
+            const { data: prod } = await supabase.from('products').select('current_stock').eq('id', item.product_id).single();
+            const newStock = Math.max(0, (prod?.current_stock || 0) - item.quantity);
+            await supabase.from('products').update({ current_stock: newStock }).eq('id', item.product_id);
+            await supabase.from('stock_movements').insert({
+                product_id: item.product_id, user_id: req.session.userId, type: 'exit', quantity: item.quantity, balance_after: newStock, reason: 'Venda (sync offline)', reference_id: saleId
+            });
         }
 
-        // Insert payments
-        const insertPayment = db.prepare(`INSERT INTO payments (sale_id, method, amount) VALUES (?, ?, ?)`);
         for (const pm of (payments || [])) {
-            insertPayment.run(saleId, pm.method, pm.amount);
-
+            await supabase.from('payments').insert({ sale_id: saleId, method: pm.method, amount: pm.amount });
             if (pm.method === 'store_credit') {
-                db.prepare(`INSERT INTO transactions (type, description, amount, status, due_date, reference_id, reference_type)
-                    VALUES ('income', 'Venda a prazo (offline sync)', ?, 'pending', ?, ?, 'sale')
-                `).run(pm.amount, pm.due_date || localTime.substring(0, 10), saleId);
+                await supabase.from('transactions').insert({
+                    type: 'income', description: 'Venda a prazo (offline sync)', amount: pm.amount, status: 'pending', due_date: pm.due_date || localTime.substring(0, 10), reference_id: saleId, reference_type: 'sale'
+                });
             }
         }
 
-        // Insert log
-        db.prepare("INSERT INTO activity_log (user_id, action, entity, entity_id, description) VALUES (?, 'sale', 'sale', ?, ?)")
-            .run(req.session.userId, saleId, `Venda (Offline) #${String(saleId).padStart(4,'0')} - R$ ${total.toFixed(2).replace('.',',')}`);
+        await supabase.from('activity_log').insert({
+            user_id: req.session.userId, action: 'sale', entity: 'sale', entity_id: saleId, description: `Venda (Offline) #${String(saleId).padStart(4,'0')} - R$ ${total.toFixed(2).replace('.',',')}`
+        });
 
         res.json({ success: true, message: 'Venda sincronizada.', data: { id: saleId } });
     } catch (error) {
@@ -73,18 +58,10 @@ router.post('/push-sale', (req, res) => {
     }
 });
 
-/**
- * POST /api/sync/push-transaction
- * Recebe uma transação financeira criada offline
- */
-router.post('/push-transaction', (req, res) => {
+router.post('/push-transaction', async (req, res) => {
     try {
-        const db = getDatabase();
         const { type, category_id, description, amount, status, due_date, notes, created_at } = req.body;
-
-        if (!type || !description || !amount || !due_date) {
-            return res.status(400).json({ success: false, message: 'Dados incompletos.' });
-        }
+        if (!type || !description || !amount || !due_date) return res.status(400).json({ success: false, message: 'Dados incompletos.' });
 
         const dLoc = new Date();
         const pad = n => String(n).padStart(2,'0');
@@ -93,52 +70,31 @@ router.post('/push-transaction', (req, res) => {
         const initialStatus = status || 'pending';
         const paidAmount = initialStatus === 'completed' ? amount : 0;
 
-        const info = db.prepare(`
-            INSERT INTO transactions (type, category_id, description, amount, paid_amount, status, due_date, notes, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(type, category_id || null, description, amount, paidAmount, initialStatus, due_date, notes || '', created_at || localTime);
+        const { data: info, error } = await supabase.from('transactions').insert({
+            type, category_id: category_id || null, description, amount, paid_amount: paidAmount, status: initialStatus, due_date, notes: notes || '', created_at: created_at || localTime
+        }).select('id').single();
+        if (error) throw error;
 
-        res.json({ success: true, message: 'Transação sincronizada.', data: { id: info.lastInsertRowid } });
+        res.json({ success: true, message: 'Transação sincronizada.', data: { id: info.id } });
     } catch (error) {
         console.error('Sync push-transaction error:', error);
         res.status(500).json({ success: false, message: 'Erro ao sincronizar transação.' });
     }
 });
 
-/**
- * POST /api/sync/push-transaction-payment
- * Recebe um pagamento parcial ou total feito offline
- */
-router.post('/push-transaction-payment', (req, res) => {
+router.post('/push-transaction-payment', async (req, res) => {
     try {
-        const db = getDatabase();
         const { transaction_id, amount, payment_method, payment_date } = req.body;
+        if (!transaction_id || !amount) return res.status(400).json({ success: false, message: 'Dados incompletos.' });
 
-        if (!transaction_id || !amount) {
-            return res.status(400).json({ success: false, message: 'Dados incompletos.' });
-        }
-
-        const tx = db.prepare("SELECT * FROM transactions WHERE id = ?").get(transaction_id);
-        if (!tx) {
-            // Pode ser uma transação que ainda não foi sincronizada ou não existe
-            return res.status(404).json({ success: false, message: 'Transação não encontrada.' });
-        }
+        const { data: tx } = await supabase.from('transactions').select('*').eq('id', transaction_id).maybeSingle();
+        if (!tx) return res.status(404).json({ success: false, message: 'Transação não encontrada.' });
 
         const newPaidAmount = tx.paid_amount + amount;
         const newStatus = newPaidAmount >= tx.amount ? 'completed' : 'partial';
 
-        db.transaction(() => {
-            db.prepare(`
-                INSERT INTO transaction_payments (transaction_id, amount, payment_method, payment_date)
-                VALUES (?, ?, ?, ?)
-            `).run(transaction_id, amount, payment_method || 'cash', payment_date);
-
-            db.prepare(`
-                UPDATE transactions 
-                SET status = ?, paid_amount = ?, payment_date = ?, payment_method = ?
-                WHERE id = ?
-            `).run(newStatus, newPaidAmount, payment_date, payment_method || 'cash', transaction_id);
-        })();
+        await supabase.from('transaction_payments').insert({ transaction_id, amount, payment_method: payment_method || 'cash', payment_date });
+        await supabase.from('transactions').update({ status: newStatus, paid_amount: newPaidAmount, payment_date, payment_method: payment_method || 'cash' }).eq('id', transaction_id);
 
         res.json({ success: true, message: 'Pagamento sincronizado.' });
     } catch (error) {
@@ -147,49 +103,41 @@ router.post('/push-transaction-payment', (req, res) => {
     }
 });
 
-/**
- * POST /api/sync/push-cash-register
- */
-router.post('/push-cash-register', (req, res) => {
+router.post('/push-cash-register', async (req, res) => {
     try {
-        const db = getDatabase();
         const data = req.body;
-        
         let existing = null;
-        if (data.uuid) existing = db.prepare("SELECT id, status FROM cash_register WHERE uuid = ?").get(data.uuid);
-        if (!existing && data.id) existing = db.prepare("SELECT id, status FROM cash_register WHERE id = ?").get(data.id);
+        if (data.uuid) {
+            const { data: ex1 } = await supabase.from('cash_registers').select('id, status').eq('uuid', data.uuid).maybeSingle();
+            existing = ex1;
+        }
+        if (!existing && data.id) {
+            const { data: ex2 } = await supabase.from('cash_registers').select('id, status').eq('id', data.id).maybeSingle();
+            existing = ex2;
+        }
         if (!existing && data.status === 'closed') {
-            // Se ainda não achou, talvez esteja tentando fechar um caixa que abriu online, podemos pegar o último aberto
-            existing = db.prepare("SELECT id, status FROM cash_register WHERE status = 'open' ORDER BY opened_at DESC LIMIT 1").get();
+            const { data: ex3 } = await supabase.from('cash_registers').select('id, status').eq('status', 'open').order('opened_at', { ascending: false }).limit(1).maybeSingle();
+            existing = ex3;
         }
 
         if (existing) {
             if (data.status === 'closed' && existing.status === 'open') {
-                db.prepare(`
-                    UPDATE cash_register 
-                    SET status = 'closed', closed_at = ?, closing_balance = ?, notes = ?
-                    WHERE id = ?
-                `).run(data.closed_at, data.closing_balance, data.closing_notes, existing.id);
-                db.prepare("INSERT INTO activity_log (user_id, action, entity, entity_id, description) VALUES (?, 'close_register', 'cash_register', ?, 'Caixa Fechado (Offline)')").run(req.session.userId, existing.id);
+                await supabase.from('cash_registers').update({ status: 'closed', closed_at: data.closed_at, closing_balance: data.closing_balance, closing_notes: data.closing_notes }).eq('id', existing.id);
+                await supabase.from('activity_log').insert({ user_id: req.session.userId, action: 'close_register', entity: 'cash_register', entity_id: existing.id, description: 'Caixa Fechado (Offline)' });
                 return res.json({ success: true, message: 'Caixa fechado sincronizado.' });
             }
             return res.json({ success: true, message: 'Caixa já sincronizado.' });
         }
         
-        const crInfo = db.prepare(`
-            INSERT INTO cash_register (user_id, opening_balance, status, opened_at, uuid)
-            VALUES (?, ?, ?, ?, ?)
-        `).run(req.session.userId, data.opening_balance, data.status, data.opened_at, data.uuid);
+        const { data: crInfo } = await supabase.from('cash_registers').insert({
+            user_id: req.session.userId, opening_balance: data.opening_balance, status: data.status, opened_at: data.opened_at, uuid: data.uuid
+        }).select('id').single();
         
-        db.prepare("INSERT INTO activity_log (user_id, action, entity, entity_id, description) VALUES (?, 'open_register', 'cash_register', ?, 'Caixa Aberto (Offline)')").run(req.session.userId, crInfo.lastInsertRowid);
+        await supabase.from('activity_log').insert({ user_id: req.session.userId, action: 'open_register', entity: 'cash_register', entity_id: crInfo.id, description: 'Caixa Aberto (Offline)' });
 
         if (data.status === 'closed' && data.closed_at) {
-            db.prepare(`
-                UPDATE cash_register 
-                SET closed_at = ?, closing_balance = ?, notes = ?
-                WHERE id = ?
-            `).run(data.closed_at, data.closing_balance, data.closing_notes, crInfo.lastInsertRowid);
-            db.prepare("INSERT INTO activity_log (user_id, action, entity, entity_id, description) VALUES (?, 'close_register', 'cash_register', ?, 'Caixa Fechado (Offline)')").run(req.session.userId, crInfo.lastInsertRowid);
+            await supabase.from('cash_registers').update({ closed_at: data.closed_at, closing_balance: data.closing_balance, closing_notes: data.closing_notes }).eq('id', crInfo.id);
+            await supabase.from('activity_log').insert({ user_id: req.session.userId, action: 'close_register', entity: 'cash_register', entity_id: crInfo.id, description: 'Caixa Fechado (Offline)' });
         }
 
         res.json({ success: true, message: 'Registro de caixa sincronizado.' });
@@ -199,33 +147,29 @@ router.post('/push-cash-register', (req, res) => {
     }
 });
 
-/**
- * POST /api/sync/push-cash-movement
- */
-router.post('/push-cash-movement', (req, res) => {
+router.post('/push-cash-movement', async (req, res) => {
     try {
-        const db = getDatabase();
         const data = req.body;
         if (!data.uuid) return res.status(400).json({ success: false, message: 'Dados incompletos' });
         
-        const existing = db.prepare("SELECT id FROM cash_movements WHERE uuid = ?").get(data.uuid);
+        const { data: existing } = await supabase.from('cash_movements').select('id').eq('uuid', data.uuid).maybeSingle();
         if (existing) return res.json({ success: true, message: 'Movimento já sincronizado.' });
 
         let realCashRegisterId = null;
         if (data.cash_register_uuid) {
-            const cr = db.prepare("SELECT id FROM cash_register WHERE uuid = ?").get(data.cash_register_uuid);
+            const { data: cr } = await supabase.from('cash_registers').select('id').eq('uuid', data.cash_register_uuid).maybeSingle();
             if (cr) realCashRegisterId = cr.id;
         } else if (data.cash_register_id && typeof data.cash_register_id === 'number' && data.cash_register_id > 0) {
             realCashRegisterId = data.cash_register_id;
         }
 
-        const movInfo = db.prepare(`
-            INSERT INTO cash_movements (cash_register_id, user_id, type, amount, reason, uuid, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        `).run(realCashRegisterId, req.session.userId, data.type, data.amount, data.reason, data.uuid, data.created_at);
+        const { data: movInfo } = await supabase.from('cash_movements').insert({
+            cash_register_id: realCashRegisterId, user_id: req.session.userId, type: data.type, amount: data.amount, reason: data.reason, uuid: data.uuid, created_at: data.created_at
+        }).select('id').single();
         
-        db.prepare("INSERT INTO activity_log (user_id, action, entity, entity_id, description) VALUES (?, ?, 'cash_movements', ?, ?)")
-            .run(req.session.userId, data.type, movInfo.lastInsertRowid, `${data.type === 'withdraw' ? 'Sangria' : 'Suprimento'} (Offline) - R$ ${parseFloat(data.amount).toFixed(2).replace('.',',')}`);
+        await supabase.from('activity_log').insert({
+            user_id: req.session.userId, action: data.type, entity: 'cash_movements', entity_id: movInfo.id, description: `${data.type === 'withdraw' ? 'Sangria' : 'Suprimento'} (Offline) - R$ ${parseFloat(data.amount).toFixed(2).replace('.',',')}`
+        });
         
         res.json({ success: true, message: 'Movimento de caixa sincronizado.' });
     } catch (e) {
@@ -234,44 +178,44 @@ router.post('/push-cash-movement', (req, res) => {
     }
 });
 
-/**
- * GET /api/sync/pull-all
- * Retorna TODOS os dados do servidor para popular o IndexedDB local
- */
-router.get('/pull-all', (req, res) => {
+router.get('/pull-all', async (req, res) => {
     try {
-        const db = getDatabase();
+        const { data: products } = await supabase.from('products').select('*');
+        const { data: categories } = await supabase.from('categories').select('*');
+        const { data: customers } = await supabase.from('customers').select('*');
+        const { data: suppliers } = await supabase.from('suppliers').select('*');
+        const { data: salesRaw } = await supabase.from('sales').select('*, users(full_name)').order('created_at', { ascending: false }).limit(500);
+        const sales = (salesRaw || []).map(s => ({ ...s, user_name: s.users?.full_name }));
+        
+        let sale_items = [];
+        let payments = [];
+        if (sales.length > 0) {
+            const saleIds = sales.map(s => s.id);
+            const { data: siRaw } = await supabase.from('sale_items').select('*, products(name)').in('sale_id', saleIds);
+            sale_items = (siRaw || []).map(si => ({ ...si, product_name: si.products?.name }));
+            const { data: pms } = await supabase.from('payments').select('*').in('sale_id', saleIds);
+            payments = pms || [];
+        }
 
-        const products = db.prepare("SELECT * FROM products").all();
-        const categories = db.prepare("SELECT * FROM categories").all();
-        const customers = db.prepare("SELECT * FROM customers").all();
-        const suppliers = db.prepare("SELECT * FROM suppliers").all();
-        const sales = db.prepare("SELECT s.*, u.full_name as user_name FROM sales s LEFT JOIN users u ON s.user_id = u.id ORDER BY s.created_at DESC LIMIT 500").all();
-        const sale_items = db.prepare("SELECT si.*, p.name as product_name FROM sale_items si LEFT JOIN products p ON si.product_id = p.id WHERE si.sale_id IN (SELECT id FROM sales ORDER BY created_at DESC LIMIT 500)").all();
-        const payments = db.prepare("SELECT * FROM payments WHERE sale_id IN (SELECT id FROM sales ORDER BY created_at DESC LIMIT 500)").all();
-        const transaction_categories = db.prepare("SELECT * FROM transaction_categories").all();
-        const transactions = db.prepare(`
-            SELECT t.*, c.name as category_name, c.color as category_color 
-            FROM transactions t
-            LEFT JOIN transaction_categories c ON t.category_id = c.id
-            ORDER BY t.due_date DESC LIMIT 500
-        `).all();
+        const { data: transaction_categories } = await supabase.from('transaction_categories').select('*');
+        const { data: txRaw } = await supabase.from('transactions').select('*, transaction_categories(name, color)').order('due_date', { ascending: false }).limit(500);
+        const transactions = (txRaw || []).map(t => ({ ...t, category_name: t.transaction_categories?.name, category_color: t.transaction_categories?.color }));
         
         let transaction_payments = [];
         if (transactions.length > 0) {
-            const txIds = transactions.map(t => t.id).join(',');
-            transaction_payments = db.prepare(`SELECT * FROM transaction_payments WHERE transaction_id IN (${txIds})`).all();
+            const txIds = transactions.map(t => t.id);
+            const { data: tp } = await supabase.from('transaction_payments').select('*').in('transaction_id', txIds);
+            transaction_payments = tp || [];
         }
 
-        const stock_movements = db.prepare("SELECT * FROM stock_movements ORDER BY created_at DESC LIMIT 500").all();
-        const cash_registers = db.prepare("SELECT * FROM cash_register ORDER BY opened_at DESC LIMIT 50").all();
-        const cash_movements = db.prepare("SELECT * FROM cash_movements ORDER BY created_at DESC LIMIT 500").all();
-        const bank_accounts = db.prepare("SELECT * FROM bank_accounts").all();
+        const { data: stock_movements } = await supabase.from('stock_movements').select('*').order('created_at', { ascending: false }).limit(500);
+        const { data: cash_registers } = await supabase.from('cash_registers').select('*').order('opened_at', { ascending: false }).limit(50);
+        const { data: cash_movements } = await supabase.from('cash_movements').select('*').order('created_at', { ascending: false }).limit(500);
+        const { data: bank_accounts } = await supabase.from('bank_accounts').select('*');
 
-        // Settings
-        const settingsRows = db.prepare("SELECT key, value FROM app_settings").all();
+        const { data: settingsRows } = await supabase.from('app_settings').select('key, value');
         const settings = {};
-        settingsRows.forEach(r => { try { settings[r.key] = JSON.parse(r.value); } catch { settings[r.key] = r.value; } });
+        (settingsRows || []).forEach(r => { try { settings[r.key] = JSON.parse(r.value); } catch { settings[r.key] = r.value; } });
 
         res.json({
             success: true,

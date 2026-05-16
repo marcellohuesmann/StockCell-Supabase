@@ -1,5 +1,5 @@
 const express = require('express');
-const { getDatabase } = require('../database/init');
+const supabase = require('../database/supabase');
 const { requireAuth } = require('../middleware/auth');
 
 const router = express.Router();
@@ -9,33 +9,33 @@ router.use(requireAuth);
  * GET /api/categories
  * Lista todas as categorias
  */
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
     try {
-        const db = getDatabase();
         const { search, active } = req.query;
 
-        let query = 'SELECT * FROM categories';
-        const conditions = [];
-        const params = [];
+        let query = supabase.from('categories').select('*');
 
         if (active !== undefined) {
-            conditions.push('active = ?');
-            params.push(active === 'true' ? 1 : 0);
+            query = query.eq('active', active === 'true');
         }
         if (search) {
-            conditions.push('(name LIKE ? OR description LIKE ?)');
-            params.push(`%${search}%`, `%${search}%`);
+            query = query.or(`name.ilike.%${search}%,description.ilike.%${search}%`);
         }
 
-        if (conditions.length) query += ' WHERE ' + conditions.join(' AND ');
-        query += ' ORDER BY sort_order ASC, name ASC';
+        query = query.order('sort_order', { ascending: true }).order('name', { ascending: true });
 
-        const categories = db.prepare(query).all(...params);
+        const { data: categories, error } = await query;
+        
+        if (error) throw error;
 
         // Conta produtos por categoria
-        const countStmt = db.prepare('SELECT COUNT(*) as count FROM products WHERE category_id = ? AND active = 1');
+        const { data: products } = await supabase
+            .from('products')
+            .select('category_id')
+            .eq('active', true);
+            
         categories.forEach(cat => {
-            cat.product_count = countStmt.get(cat.id).count;
+            cat.product_count = (products || []).filter(p => p.category_id === cat.id).length;
         });
 
         res.json({ success: true, data: categories });
@@ -48,10 +48,14 @@ router.get('/', (req, res) => {
 /**
  * GET /api/categories/:id
  */
-router.get('/:id', (req, res) => {
+router.get('/:id', async (req, res) => {
     try {
-        const db = getDatabase();
-        const category = db.prepare('SELECT * FROM categories WHERE id = ?').get(req.params.id);
+        const { data: category } = await supabase
+            .from('categories')
+            .select('*')
+            .eq('id', req.params.id)
+            .maybeSingle();
+            
         if (!category) return res.status(404).json({ success: false, message: 'Categoria não encontrada.' });
         res.json({ success: true, data: category });
     } catch (error) {
@@ -62,29 +66,44 @@ router.get('/:id', (req, res) => {
 /**
  * POST /api/categories
  */
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
     try {
-        const db = getDatabase();
         const { name, description, icon, sort_order } = req.body;
 
         if (!name || !name.trim()) {
             return res.status(400).json({ success: false, message: 'Nome da categoria é obrigatório.' });
         }
 
-        const existing = db.prepare('SELECT id FROM categories WHERE LOWER(name) = LOWER(?)').get(name.trim());
+        const { data: existing } = await supabase
+            .from('categories')
+            .select('id')
+            .ilike('name', name.trim())
+            .maybeSingle();
+            
         if (existing) {
             return res.status(400).json({ success: false, message: 'Já existe uma categoria com este nome.' });
         }
 
-        const result = db.prepare(`
-            INSERT INTO categories (name, description, icon, sort_order)
-            VALUES (?, ?, ?, ?)
-        `).run(name.trim(), description || '', icon || '📦', sort_order || 0);
+        const { data: category, error } = await supabase
+            .from('categories')
+            .insert({
+                name: name.trim(),
+                description: description || '',
+                icon: icon || '📦',
+                sort_order: sort_order || 0
+            })
+            .select()
+            .single();
+            
+        if (error) throw error;
 
-        const category = db.prepare('SELECT * FROM categories WHERE id = ?').get(result.lastInsertRowid);
-
-        db.prepare(`INSERT INTO activity_log (user_id, action, entity, entity_id, description) VALUES (?, 'create', 'category', ?, ?)`)
-            .run(req.session.userId, category.id, `Categoria "${name}" criada`);
+        await supabase.from('activity_log').insert({
+            user_id: req.session.userId,
+            action: 'create',
+            entity: 'category',
+            entity_id: category.id,
+            description: `Categoria "${name}" criada`
+        });
 
         res.status(201).json({ success: true, data: category, message: 'Categoria criada com sucesso!' });
     } catch (error) {
@@ -96,33 +115,52 @@ router.post('/', (req, res) => {
 /**
  * PUT /api/categories/:id
  */
-router.put('/:id', (req, res) => {
+router.put('/:id', async (req, res) => {
     try {
-        const db = getDatabase();
         const { name, description, icon, sort_order, active } = req.body;
 
-        const existing = db.prepare('SELECT * FROM categories WHERE id = ?').get(req.params.id);
+        const { data: existing } = await supabase
+            .from('categories')
+            .select('*')
+            .eq('id', req.params.id)
+            .maybeSingle();
+            
         if (!existing) return res.status(404).json({ success: false, message: 'Categoria não encontrada.' });
 
         if (name && name.trim()) {
-            const duplicate = db.prepare('SELECT id FROM categories WHERE LOWER(name) = LOWER(?) AND id != ?').get(name.trim(), req.params.id);
+            const { data: duplicate } = await supabase
+                .from('categories')
+                .select('id')
+                .ilike('name', name.trim())
+                .neq('id', req.params.id)
+                .maybeSingle();
+                
             if (duplicate) return res.status(400).json({ success: false, message: 'Já existe uma categoria com este nome.' });
         }
 
-        db.prepare(`
-            UPDATE categories SET
-                name = COALESCE(?, name),
-                description = COALESCE(?, description),
-                icon = COALESCE(?, icon),
-                sort_order = COALESCE(?, sort_order),
-                active = COALESCE(?, active)
-            WHERE id = ?
-        `).run(name?.trim() || null, description, icon, sort_order, active, req.params.id);
+        const updates = {};
+        if (name !== undefined) updates.name = name.trim();
+        if (description !== undefined) updates.description = description;
+        if (icon !== undefined) updates.icon = icon;
+        if (sort_order !== undefined) updates.sort_order = sort_order;
+        if (active !== undefined) updates.active = active;
 
-        const category = db.prepare('SELECT * FROM categories WHERE id = ?').get(req.params.id);
+        const { data: category, error } = await supabase
+            .from('categories')
+            .update(updates)
+            .eq('id', req.params.id)
+            .select()
+            .single();
 
-        db.prepare(`INSERT INTO activity_log (user_id, action, entity, entity_id, description) VALUES (?, 'update', 'category', ?, ?)`)
-            .run(req.session.userId, category.id, `Categoria "${category.name}" atualizada`);
+        if (error) throw error;
+
+        await supabase.from('activity_log').insert({
+            user_id: req.session.userId,
+            action: 'update',
+            entity: 'category',
+            entity_id: category.id,
+            description: `Categoria "${category.name}" atualizada`
+        });
 
         res.json({ success: true, data: category, message: 'Categoria atualizada com sucesso!' });
     } catch (error) {
@@ -134,25 +172,38 @@ router.put('/:id', (req, res) => {
 /**
  * DELETE /api/categories/:id
  */
-router.delete('/:id', (req, res) => {
+router.delete('/:id', async (req, res) => {
     try {
-        const db = getDatabase();
-        const category = db.prepare('SELECT * FROM categories WHERE id = ?').get(req.params.id);
+        const { data: category } = await supabase
+            .from('categories')
+            .select('*')
+            .eq('id', req.params.id)
+            .maybeSingle();
+            
         if (!category) return res.status(404).json({ success: false, message: 'Categoria não encontrada.' });
 
         // Verifica se tem produtos vinculados
-        const productCount = db.prepare('SELECT COUNT(*) as count FROM products WHERE category_id = ?').get(req.params.id).count;
-        if (productCount > 0) {
+        const { count } = await supabase
+            .from('products')
+            .select('*', { count: 'exact', head: true })
+            .eq('category_id', req.params.id);
+            
+        if (count > 0) {
             return res.status(400).json({
                 success: false,
-                message: `Não é possível excluir. Existem ${productCount} produto(s) nesta categoria. Desative-a ou mova os produtos.`
+                message: `Não é possível excluir. Existem ${count} produto(s) nesta categoria. Desative-a ou mova os produtos.`
             });
         }
 
-        db.prepare('DELETE FROM categories WHERE id = ?').run(req.params.id);
+        await supabase.from('categories').delete().eq('id', req.params.id);
 
-        db.prepare(`INSERT INTO activity_log (user_id, action, entity, entity_id, description) VALUES (?, 'delete', 'category', ?, ?)`)
-            .run(req.session.userId, req.params.id, `Categoria "${category.name}" excluída`);
+        await supabase.from('activity_log').insert({
+            user_id: req.session.userId,
+            action: 'delete',
+            entity: 'category',
+            entity_id: req.params.id,
+            description: `Categoria "${category.name}" excluída`
+        });
 
         res.json({ success: true, message: 'Categoria excluída com sucesso!' });
     } catch (error) {

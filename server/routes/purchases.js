@@ -1,5 +1,5 @@
 const express = require('express');
-const { getDatabase } = require('../database/init');
+const supabase = require('../database/supabase');
 const { requireAuth } = require('../middleware/auth');
 const router = express.Router();
 
@@ -9,27 +9,31 @@ router.use(requireAuth);
  * GET /api/purchases
  * Listar pedidos de compra
  */
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
     try {
-        const db = getDatabase();
-        const purchases = db.prepare(`
-            SELECT p.*, s.company_name as supplier_name 
-            FROM purchase_orders p
-            LEFT JOIN suppliers s ON p.supplier_id = s.id
-            ORDER BY p.created_at DESC
-            LIMIT 100
-        `).all();
-
-        const itemsStmt = db.prepare(`
-            SELECT pi.*, pr.name as product_name
-            FROM purchase_items pi
-            JOIN products pr ON pi.product_id = pr.id
-            WHERE pi.purchase_id = ?
-        `);
-
-        purchases.forEach(p => {
-            p.items = itemsStmt.all(p.id);
-        });
+        const { data: purchasesRaw, error } = await supabase.from('purchase_orders').select('*, suppliers(company_name)').order('created_at', { ascending: false }).limit(100);
+        if (error) throw error;
+        
+        const purchaseIds = (purchasesRaw || []).map(p => p.id);
+        let itemsMap = {};
+        if (purchaseIds.length > 0) {
+            const { data: itemsRaw } = await supabase.from('purchase_items').select('*, products(name)').in('purchase_id', purchaseIds);
+            if (itemsRaw) {
+                itemsRaw.forEach(item => {
+                    if (!itemsMap[item.purchase_id]) itemsMap[item.purchase_id] = [];
+                    itemsMap[item.purchase_id].push({
+                        ...item,
+                        product_name: item.products?.name
+                    });
+                });
+            }
+        }
+        
+        const purchases = (purchasesRaw || []).map(p => ({
+            ...p,
+            supplier_name: p.suppliers?.company_name,
+            items: itemsMap[p.id] || []
+        }));
 
         res.json({ success: true, data: purchases });
     } catch (error) {
@@ -42,41 +46,34 @@ router.get('/', (req, res) => {
  * POST /api/purchases
  * Criar um novo pedido de compra
  */
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
     try {
         const { supplier_id, expected_date, notes, items } = req.body;
         
         if (!supplier_id || !items || !items.length) {
             return res.status(400).json({ success: false, message: 'Fornecedor e itens são obrigatórios.' });
         }
-
-        const db = getDatabase();
         
-        let purchaseId;
-        db.transaction(() => {
-            const totalAmount = items.reduce((sum, item) => sum + (parseFloat(item.unit_cost) * parseInt(item.quantity)), 0);
+        const totalAmount = items.reduce((sum, item) => sum + (parseFloat(item.unit_cost) * parseInt(item.quantity)), 0);
 
-            const result = db.prepare(`
-                INSERT INTO purchase_orders (supplier_id, user_id, status, total_amount, expected_date, notes)
-                VALUES (?, ?, 'pending', ?, ?, ?)
-            `).run(supplier_id, req.session.userId, totalAmount, expected_date || null, notes || '');
+        const { data: result, error: insertError } = await supabase.from('purchase_orders').insert({
+            supplier_id, user_id: req.session.userId, status: 'pending', total_amount: totalAmount, expected_date: expected_date || null, notes: notes || ''
+        }).select('id').single();
+        if (insertError) throw insertError;
 
-            purchaseId = result.lastInsertRowid;
+        const purchaseId = result.id;
 
-            const insertItem = db.prepare(`
-                INSERT INTO purchase_items (purchase_id, product_id, quantity, unit_cost, total_cost)
-                VALUES (?, ?, ?, ?, ?)
-            `);
+        for (const item of items) {
+            const q = parseInt(item.quantity);
+            const c = parseFloat(item.unit_cost);
+            await supabase.from('purchase_items').insert({
+                purchase_id: purchaseId, product_id: item.product_id, quantity: q, unit_cost: c, total_cost: q * c
+            });
+        }
 
-            for (const item of items) {
-                const q = parseInt(item.quantity);
-                const c = parseFloat(item.unit_cost);
-                insertItem.run(purchaseId, item.product_id, q, c, q * c);
-            }
-
-            db.prepare("INSERT INTO activity_log (user_id, action, entity, entity_id, description) VALUES (?, 'create', 'purchase', ?, ?)")
-                .run(req.session.userId, purchaseId, `Pedido de Compra #${String(purchaseId).padStart(4,'0')} criado`);
-        })();
+        await supabase.from('activity_log').insert({
+            user_id: req.session.userId, action: 'create', entity: 'purchase', entity_id: purchaseId, description: `Pedido de Compra #${String(purchaseId).padStart(4,'0')} criado`
+        });
 
         res.status(201).json({ success: true, message: 'Pedido de compra criado com sucesso!', data: { id: purchaseId } });
     } catch (error) {
@@ -89,53 +86,49 @@ router.post('/', (req, res) => {
  * PUT /api/purchases/:id/receive
  * Receber o pedido de compra (Atualiza estoque e gera Contas a Pagar)
  */
-router.put('/:id/receive', (req, res) => {
+router.put('/:id/receive', async (req, res) => {
     try {
         const { generate_payable, account_id, due_date } = req.body;
         const purchaseId = req.params.id;
-        const db = getDatabase();
 
-        const purchase = db.prepare('SELECT * FROM purchase_orders WHERE id = ?').get(purchaseId);
+        const { data: purchase } = await supabase.from('purchase_orders').select('*').eq('id', purchaseId).maybeSingle();
         if (!purchase) return res.status(404).json({ success: false, message: 'Pedido não encontrado.' });
         if (purchase.status !== 'pending') return res.status(400).json({ success: false, message: 'Pedido já recebido ou cancelado.' });
 
-        const items = db.prepare('SELECT * FROM purchase_items WHERE purchase_id = ?').all(purchaseId);
+        const { data: items } = await supabase.from('purchase_items').select('*').eq('purchase_id', purchaseId);
 
-        db.transaction(() => {
-            // 1. Atualizar Status
-            db.prepare(`UPDATE purchase_orders SET status = 'received', received_date = datetime('now','localtime'), updated_at = datetime('now','localtime') WHERE id = ?`).run(purchaseId);
+        await supabase.from('purchase_orders').update({
+            status: 'received', received_date: new Date().toISOString(), updated_at: new Date().toISOString()
+        }).eq('id', purchaseId);
 
-            // 2. Atualizar Estoque
-            const updateStock = db.prepare('UPDATE products SET current_stock = current_stock + ?, updated_at = datetime(\'now\',\'localtime\') WHERE id = ?');
-            const insertMovement = db.prepare('INSERT INTO stock_movements (product_id, user_id, type, quantity, balance_after, reason, reference_id) VALUES (?,?,\'entry\',?,?,?,?)');
-            const updateCost = db.prepare('UPDATE products SET cost_price = ? WHERE id = ? AND cost_price != ?');
+        for (const item of (items || [])) {
+            const { data: product } = await supabase.from('products').select('current_stock, cost_price').eq('id', item.product_id).maybeSingle();
+            if (product) {
+                const newStock = product.current_stock + item.quantity;
+                await supabase.from('products').update({
+                    current_stock: newStock, cost_price: item.unit_cost, updated_at: new Date().toISOString()
+                }).eq('id', item.product_id);
 
-            for (const item of items) {
-                updateStock.run(item.quantity, item.product_id);
-                // Opcional: Atualizar preço de custo médio (aqui atualizando pro último custo)
-                updateCost.run(item.unit_cost, item.product_id, item.unit_cost);
-
-                const newBalance = db.prepare('SELECT current_stock FROM products WHERE id = ?').get(item.product_id).current_stock;
-                insertMovement.run(item.product_id, req.session.userId, item.quantity, newBalance, `Recebimento Pedido #${String(purchaseId).padStart(4,'0')}`, purchaseId);
+                await supabase.from('stock_movements').insert({
+                    product_id: item.product_id, user_id: req.session.userId, type: 'entry', quantity: item.quantity, balance_after: newStock, reason: `Recebimento Pedido #${String(purchaseId).padStart(4,'0')}`, reference_id: purchaseId
+                });
             }
+        }
 
-            // 3. Gerar Contas a Pagar (Opcional)
-            if (generate_payable) {
-                const supplier = db.prepare('SELECT company_name FROM suppliers WHERE id = ?').get(purchase.supplier_id);
-                const desc = `Compra: ${supplier ? supplier.company_name : 'Fornecedor'} (Pedido #${String(purchaseId).padStart(4,'0')})`;
-                
-                // Get general expenses category if exists
-                const cat = db.prepare("SELECT id FROM transaction_categories WHERE type = 'expense' LIMIT 1").get();
-                
-                db.prepare(`
-                    INSERT INTO transactions (type, category_id, description, amount, status, due_date, reference_id, reference_type)
-                    VALUES ('expense', ?, ?, ?, 'pending', ?, ?, 'purchase')
-                `).run(cat ? cat.id : null, desc, purchase.total_amount, due_date || new Date().toISOString().split('T')[0], purchaseId);
-            }
+        if (generate_payable) {
+            const { data: supplier } = await supabase.from('suppliers').select('company_name').eq('id', purchase.supplier_id).maybeSingle();
+            const desc = `Compra: ${supplier ? supplier.company_name : 'Fornecedor'} (Pedido #${String(purchaseId).padStart(4,'0')})`;
+            
+            const { data: cat } = await supabase.from('transaction_categories').select('id').eq('type', 'expense').limit(1).maybeSingle();
+            
+            await supabase.from('transactions').insert({
+                type: 'expense', category_id: cat ? cat.id : null, description: desc, amount: purchase.total_amount, status: 'pending', due_date: due_date || new Date().toISOString().split('T')[0], reference_id: purchaseId, reference_type: 'purchase'
+            });
+        }
 
-            db.prepare("INSERT INTO activity_log (user_id, action, entity, entity_id, description) VALUES (?, 'receive', 'purchase', ?, ?)")
-                .run(req.session.userId, purchaseId, `Pedido de Compra #${String(purchaseId).padStart(4,'0')} recebido no estoque`);
-        })();
+        await supabase.from('activity_log').insert({
+            user_id: req.session.userId, action: 'receive', entity: 'purchase', entity_id: purchaseId, description: `Pedido de Compra #${String(purchaseId).padStart(4,'0')} recebido no estoque`
+        });
 
         res.json({ success: true, message: 'Pedido recebido com sucesso. Estoque atualizado!' });
     } catch (error) {
@@ -148,19 +141,21 @@ router.put('/:id/receive', (req, res) => {
  * DELETE /api/purchases/:id
  * Cancelar um pedido de compra pendente
  */
-router.delete('/:id', (req, res) => {
+router.delete('/:id', async (req, res) => {
     try {
         const purchaseId = req.params.id;
-        const db = getDatabase();
 
-        const purchase = db.prepare('SELECT status FROM purchase_orders WHERE id = ?').get(purchaseId);
+        const { data: purchase } = await supabase.from('purchase_orders').select('status').eq('id', purchaseId).maybeSingle();
         if (!purchase) return res.status(404).json({ success: false, message: 'Pedido não encontrado.' });
         if (purchase.status === 'received') return res.status(400).json({ success: false, message: 'Não é possível cancelar um pedido já recebido.' });
 
-        db.prepare(`UPDATE purchase_orders SET status = 'cancelled', updated_at = datetime('now','localtime') WHERE id = ?`).run(purchaseId);
+        await supabase.from('purchase_orders').update({
+            status: 'cancelled', updated_at: new Date().toISOString()
+        }).eq('id', purchaseId);
 
-        db.prepare("INSERT INTO activity_log (user_id, action, entity, entity_id, description) VALUES (?, 'cancel', 'purchase', ?, ?)")
-            .run(req.session.userId, purchaseId, `Pedido de Compra #${String(purchaseId).padStart(4,'0')} cancelado`);
+        await supabase.from('activity_log').insert({
+            user_id: req.session.userId, action: 'cancel', entity: 'purchase', entity_id: purchaseId, description: `Pedido de Compra #${String(purchaseId).padStart(4,'0')} cancelado`
+        });
 
         res.json({ success: true, message: 'Pedido cancelado com sucesso.' });
     } catch (error) {

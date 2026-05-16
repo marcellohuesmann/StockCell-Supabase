@@ -1,5 +1,5 @@
 const express = require('express');
-const { getDatabase } = require('../database/init');
+const supabase = require('../database/supabase');
 const { requireAuth } = require('../middleware/auth');
 const router = express.Router();
 router.use(requireAuth);
@@ -8,21 +8,26 @@ router.use(requireAuth);
  * GET /api/receipts/:saleId
  * Retorna HTML do cupom formatado para impressao/PDF
  */
-router.get('/:saleId', (req, res) => {
+router.get('/:saleId', async (req, res) => {
     try {
-        const db = getDatabase();
-        const sale = db.prepare(`
-            SELECT s.*, u.full_name as user_name, c.name as customer_name, c.cpf as customer_cpf
-            FROM sales s LEFT JOIN users u ON s.user_id = u.id
-            LEFT JOIN customers c ON s.customer_id = c.id WHERE s.id = ?
-        `).get(req.params.saleId);
+        const { data: sale } = await supabase.from('sales').select('*, users(full_name), customers(name, cpf)').eq('id', req.params.saleId).maybeSingle();
 
         if (!sale) return res.status(404).json({ success: false, message: 'Venda n\u00e3o encontrada.' });
+        
+        sale.user_name = sale.users?.full_name;
+        sale.customer_name = sale.customers?.name;
+        sale.customer_cpf = sale.customers?.cpf;
 
-        const items = db.prepare('SELECT si.*, p.name as product_name, p.barcode FROM sale_items si JOIN products p ON si.product_id = p.id WHERE si.sale_id = ?').all(req.params.saleId);
-        const payments = db.prepare('SELECT * FROM payments WHERE sale_id = ?').all(req.params.saleId);
+        const { data: itemsRaw } = await supabase.from('sale_items').select('*, products(name, barcode)').eq('sale_id', req.params.saleId);
+        const items = (itemsRaw || []).map(i => ({ ...i, product_name: i.products?.name, barcode: i.products?.barcode }));
+        
+        const { data: payments } = await supabase.from('payments').select('*').eq('sale_id', req.params.saleId);
 
-        const getSetting = (key) => { const r = db.prepare("SELECT value FROM app_settings WHERE key = ?").get(key); return r ? r.value : ''; };
+        const { data: settings } = await supabase.from('app_settings').select('key, value');
+        const settingsMap = {};
+        (settings || []).forEach(s => settingsMap[s.key] = s.value);
+        
+        const getSetting = (key) => settingsMap[key] || '';
         const storeName = getSetting('store_name') || 'StockCell';
         const storeCNPJ = getSetting('store_cnpj');
         const storePhone = getSetting('store_phone');

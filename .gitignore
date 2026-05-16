@@ -22,6 +22,11 @@ Thumbs.db
 Desktop.ini
 .DS_Store
 
+# Environment (credenciais Supabase)
+.env
+.env.*
+!.env.example
+
 # IDE
 .vscode/
 *.code-workspace

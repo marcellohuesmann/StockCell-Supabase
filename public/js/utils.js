@@ -74,14 +74,10 @@ const Utils = {
     },
 
     /**
-     * Formata número de pedido (ddmmaahhmmss)
+     * Formata número de pedido (sequencial progressivo)
      */
     formatOrder(id, dateStr) {
-        if (!dateStr) return `#${String(id).padStart(4, '0')}`;
-        const d = new Date(dateStr);
-        const pad = n => String(n).padStart(2, '0');
-        const yy = String(d.getFullYear()).slice(-2);
-        return `${pad(d.getDate())}${pad(d.getMonth()+1)}${yy}${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+        return `#${String(id).padStart(5, '0')}`;
     },
 
     /**

@@ -1,72 +1,163 @@
 const express = require('express');
-const { getDatabase } = require('../database/init');
+const supabase = require('../database/supabase');
 const { requireAuth } = require('../middleware/auth');
 const router = express.Router();
 router.use(requireAuth);
 
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
     try {
-        const db = getDatabase();
         const { search } = req.query;
-        let query = 'SELECT * FROM customers';
-        const params = [];
+        let query = supabase.from('customers').select('*').order('name', { ascending: true });
+        
         if (search) {
-            query += ' WHERE (name LIKE ? OR phone LIKE ? OR cpf LIKE ? OR email LIKE ?)';
-            params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
+            query = query.or(`name.ilike.%${search}%,phone.ilike.%${search}%,cpf.ilike.%${search}%,email.ilike.%${search}%`);
         }
-        query += ' ORDER BY name ASC';
-        const customers = db.prepare(query).all(...params);
-        const countStmt = db.prepare("SELECT COUNT(*) as count, COALESCE(SUM(total),0) as total_spent FROM sales WHERE customer_id = ? AND status = 'completed'");
-        customers.forEach(c => { const s = countStmt.get(c.id); c.purchase_count = s.count; c.total_spent = s.total_spent; });
+        
+        const { data: customers, error } = await query;
+        if (error) throw error;
+        
+        const { data: sales } = await supabase
+            .from('sales')
+            .select('customer_id, total')
+            .eq('status', 'completed')
+            .not('customer_id', 'is', null);
+            
+        customers.forEach(c => {
+            const customerSales = (sales || []).filter(s => s.customer_id === c.id);
+            c.purchase_count = customerSales.length;
+            c.total_spent = customerSales.reduce((acc, curr) => acc + Number(curr.total), 0);
+        });
+        
         res.json({ success: true, data: customers });
-    } catch (e) { res.status(500).json({ success: false, message: 'Erro ao listar clientes.' }); }
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ success: false, message: 'Erro ao listar clientes.' });
+    }
 });
 
-router.get('/:id', (req, res) => {
+router.get('/:id', async (req, res) => {
     try {
-        const db = getDatabase();
-        const c = db.prepare('SELECT * FROM customers WHERE id = ?').get(req.params.id);
+        const { data: c } = await supabase
+            .from('customers')
+            .select('*')
+            .eq('id', req.params.id)
+            .maybeSingle();
+            
         if (!c) return res.status(404).json({ success: false, message: 'Cliente não encontrado.' });
         res.json({ success: true, data: c });
-    } catch (e) { res.status(500).json({ success: false, message: 'Erro ao buscar cliente.' }); }
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ success: false, message: 'Erro ao buscar cliente.' });
+    }
 });
 
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
     try {
-        const db = getDatabase();
         const { name, phone, cpf, email, address, notes } = req.body;
         if (!name || !name.trim()) return res.status(400).json({ success: false, message: 'Nome é obrigatório.' });
-        if (cpf) { const d = db.prepare('SELECT id FROM customers WHERE cpf = ?').get(cpf.replace(/\D/g, '')); if (d) return res.status(400).json({ success: false, message: 'CPF já cadastrado.' }); }
-        const r = db.prepare('INSERT INTO customers (name,phone,cpf,email,address,notes) VALUES (?,?,?,?,?,?)').run(name.trim(), phone||'', cpf?cpf.replace(/\D/g,''):'', email||'', address||'', notes||'');
-        const customer = db.prepare('SELECT * FROM customers WHERE id = ?').get(r.lastInsertRowid);
-        db.prepare("INSERT INTO activity_log (user_id,action,entity,entity_id,description) VALUES (?,'create','customer',?,?)").run(req.session.userId, customer.id, `Cliente "${name}" cadastrado`);
+        
+        const cleanedCpf = cpf ? cpf.replace(/\D/g, '') : null;
+        if (cleanedCpf) {
+            const { data: d } = await supabase
+                .from('customers')
+                .select('id')
+                .eq('cpf', cleanedCpf)
+                .maybeSingle();
+                
+            if (d) return res.status(400).json({ success: false, message: 'CPF já cadastrado.' });
+        }
+        
+        const { data: customer, error } = await supabase
+            .from('customers')
+            .insert({
+                name: name.trim(),
+                phone: phone || '',
+                cpf: cleanedCpf || '',
+                email: email || '',
+                address: address || '',
+                notes: notes || ''
+            })
+            .select()
+            .single();
+            
+        if (error) throw error;
+        
+        await supabase.from('activity_log').insert({
+            user_id: req.session.userId,
+            action: 'create',
+            entity: 'customer',
+            entity_id: customer.id,
+            description: `Cliente "${name}" cadastrado`
+        });
+        
         res.status(201).json({ success: true, data: customer, message: 'Cliente cadastrado!' });
-    } catch (e) { console.error(e); res.status(500).json({ success: false, message: 'Erro ao cadastrar cliente.' }); }
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ success: false, message: 'Erro ao cadastrar cliente.' });
+    }
 });
 
-router.put('/:id', (req, res) => {
+router.put('/:id', async (req, res) => {
     try {
-        const db = getDatabase();
-        const ex = db.prepare('SELECT * FROM customers WHERE id = ?').get(req.params.id);
+        const { data: ex } = await supabase
+            .from('customers')
+            .select('*')
+            .eq('id', req.params.id)
+            .maybeSingle();
+            
         if (!ex) return res.status(404).json({ success: false, message: 'Cliente não encontrado.' });
+        
         const { name, phone, cpf, email, address, notes, active } = req.body;
-        db.prepare('UPDATE customers SET name=COALESCE(?,name),phone=COALESCE(?,phone),cpf=COALESCE(?,cpf),email=COALESCE(?,email),address=COALESCE(?,address),notes=COALESCE(?,notes),active=COALESCE(?,active) WHERE id=?')
-            .run(name?.trim(), phone, cpf?cpf.replace(/\D/g,''):null, email, address, notes, active, req.params.id);
-        const customer = db.prepare('SELECT * FROM customers WHERE id = ?').get(req.params.id);
+        const updates = {};
+        if (name !== undefined) updates.name = name.trim();
+        if (phone !== undefined) updates.phone = phone;
+        if (cpf !== undefined) updates.cpf = cpf ? cpf.replace(/\D/g, '') : null;
+        if (email !== undefined) updates.email = email;
+        if (address !== undefined) updates.address = address;
+        if (notes !== undefined) updates.notes = notes;
+        if (active !== undefined) updates.active = active;
+        
+        const { data: customer, error } = await supabase
+            .from('customers')
+            .update(updates)
+            .eq('id', req.params.id)
+            .select()
+            .single();
+            
+        if (error) throw error;
         res.json({ success: true, data: customer, message: 'Cliente atualizado!' });
-    } catch (e) { res.status(500).json({ success: false, message: 'Erro ao atualizar cliente.' }); }
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ success: false, message: 'Erro ao atualizar cliente.' });
+    }
 });
 
-router.delete('/:id', (req, res) => {
+router.delete('/:id', async (req, res) => {
     try {
-        const db = getDatabase();
-        const c = db.prepare('SELECT * FROM customers WHERE id = ?').get(req.params.id);
+        const { data: c } = await supabase
+            .from('customers')
+            .select('id')
+            .eq('id', req.params.id)
+            .maybeSingle();
+            
         if (!c) return res.status(404).json({ success: false, message: 'Cliente não encontrado.' });
-        const cnt = db.prepare('SELECT COUNT(*) as count FROM sales WHERE customer_id = ?').get(req.params.id).count;
-        if (cnt > 0) { db.prepare('UPDATE customers SET active = 0 WHERE id = ?').run(req.params.id); return res.json({ success: true, message: 'Cliente desativado (possui compras).' }); }
-        db.prepare('DELETE FROM customers WHERE id = ?').run(req.params.id);
+        
+        const { count } = await supabase
+            .from('sales')
+            .select('*', { count: 'exact', head: true })
+            .eq('customer_id', req.params.id);
+            
+        if (count > 0) {
+            await supabase.from('customers').update({ active: false }).eq('id', req.params.id);
+            return res.json({ success: true, message: 'Cliente desativado (possui compras).' });
+        }
+        
+        await supabase.from('customers').delete().eq('id', req.params.id);
         res.json({ success: true, message: 'Cliente excluído!' });
-    } catch (e) { res.status(500).json({ success: false, message: 'Erro ao excluir cliente.' }); }
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ success: false, message: 'Erro ao excluir cliente.' });
+    }
 });
 
 module.exports = router;
