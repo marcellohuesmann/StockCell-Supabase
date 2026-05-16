@@ -38,6 +38,14 @@ const DashboardPage = {
         const container = document.getElementById('dashboard-content');
 
         container.innerHTML = `
+            <!-- Ação Rápida (PDV) -->
+            <div style="margin-bottom: var(--space-xl); animation: slideUp .4s ease forwards;">
+                <button class="btn btn-primary" style="width: 100%; padding: 24px; font-size: 20px; font-weight: 700; border-radius: 16px; box-shadow: 0 12px 28px rgba(102,126,234,0.3); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; transition: transform 0.2s, box-shadow 0.2s;" onclick="App.navigate('pdv')" onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 15px 35px rgba(102,126,234,0.4)'" onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='0 12px 28px rgba(102,126,234,0.3)'">
+                    <span style="font-size: 36px; line-height: 1;">🛒</span>
+                    NOVA VENDA (PDV)
+                </button>
+            </div>
+
             <!-- KPIs -->
             <div class="dashboard-grid">
                 <div class="kpi-card" style="opacity:0;animation:slideUp .5s ease forwards .1s;cursor:pointer;" onclick="DashboardPage.showTodaySales()" title="Clique para ver as vendas de hoje">
