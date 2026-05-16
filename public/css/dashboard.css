@@ -1,0 +1,78 @@
+/* =============================================
+   StockCell - Dashboard
+   ============================================= */
+
+.dashboard-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: var(--space-lg);
+    margin-bottom: var(--space-lg);
+}
+
+.dash-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-lg);
+    margin-top: var(--space-lg);
+}
+
+.dashboard-charts {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: var(--space-lg);
+    margin-bottom: var(--space-lg);
+}
+
+.chart-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-lg);
+    padding: var(--space-lg);
+}
+.chart-card canvas { width: 100% !important; max-height: 300px; }
+
+.recent-sales {
+    background: var(--bg-card);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-lg);
+    padding: var(--space-lg);
+}
+.recent-sale-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-sm) 0;
+    border-bottom: 1px solid var(--border-light);
+}
+.recent-sale-item:last-child { border-bottom: none; }
+
+.low-stock-alert {
+    background: var(--warning-bg);
+    border: 1px solid var(--warning-border);
+    border-radius: var(--radius-lg);
+    padding: var(--space-lg);
+    margin-bottom: var(--space-lg);
+    display: flex;
+    align-items: center;
+    gap: var(--space-md);
+}
+.low-stock-alert-icon { font-size: 1.5rem; }
+.low-stock-alert-text { flex: 1; }
+.low-stock-alert-count {
+    font-size: var(--font-size-2xl);
+    font-weight: 700;
+    color: var(--warning);
+}
+
+@media (max-width: 1023px) {
+    .dashboard-grid { grid-template-columns: repeat(2, 1fr); }
+    .dashboard-charts { grid-template-columns: 1fr; }
+    .dash-row { grid-template-columns: 1fr; }
+}
+@media (max-width: 767px) {
+    .dashboard-grid { grid-template-columns: repeat(2, 1fr); gap: var(--space-sm); }
+    .kpi-card { padding: var(--space-md); }
+    .kpi-value { font-size: var(--font-size-lg); }
+    .kpi-label { font-size: var(--font-size-xs); }
+    .kpi-icon { width: 36px; height: 36px; font-size: 1rem; }
+}

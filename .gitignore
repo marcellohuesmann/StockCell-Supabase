@@ -1,0 +1,31 @@
+# Dependências
+node_modules/
+
+# Banco de dados (dados do cliente)
+data/*.db
+data/*.db-wal
+data/*.db-shm
+
+# Backups
+data/backups/
+
+# Uploads de imagens de produtos
+public/uploads/*
+!public/uploads/.gitkeep
+
+# Instalador
+installer/node-portable/
+installer/output/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# IDE
+.vscode/
+*.code-workspace
+
+# Logs
+*.log
+npm-debug.log*

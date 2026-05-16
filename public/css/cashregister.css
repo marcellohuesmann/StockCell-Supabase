@@ -1,0 +1,105 @@
+/* =============================================
+   StockCell - Controle de Caixa Styles
+   ============================================= */
+
+/* Card de abertura de caixa */
+.cr-open-card {
+    text-align: center;
+    padding: var(--space-2xl) var(--space-xl);
+    background: var(--bg-card);
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border-color);
+    max-width: 460px;
+    margin: 0 auto;
+}
+
+.cr-open-icon {
+    font-size: 4rem;
+    margin-bottom: var(--space-md);
+    opacity: 0.7;
+}
+
+/* Status bar */
+.cr-status-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: var(--space-sm) var(--space-md);
+    border-radius: var(--radius-md);
+    font-size: var(--font-size-sm);
+    font-weight: 600;
+    margin-bottom: var(--space-lg);
+    flex-wrap: wrap;
+    gap: var(--space-xs);
+}
+
+.cr-status-open {
+    background: rgba(16, 185, 129, 0.1);
+    border: 1px solid var(--success);
+    color: var(--success);
+}
+
+/* KPI Grid */
+.cr-kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: var(--space-md);
+    margin-bottom: var(--space-lg);
+}
+
+.cr-kpi {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    padding: var(--space-md);
+    text-align: center;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.cr-kpi:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+}
+
+.cr-kpi-highlight {
+    background: linear-gradient(135deg, rgba(102, 126, 234, 0.1), rgba(118, 75, 162, 0.1));
+    border-color: var(--accent-primary);
+}
+
+.cr-kpi-label {
+    font-size: var(--font-size-xs);
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: var(--space-xs);
+}
+
+.cr-kpi-value {
+    font-size: var(--font-size-lg);
+    font-weight: 800;
+    color: var(--text-primary);
+}
+
+.cr-kpi-success { color: var(--success); }
+.cr-kpi-danger { color: var(--danger); }
+.cr-kpi-primary { color: var(--accent-primary); }
+
+/* Actions row */
+.cr-actions {
+    display: flex;
+    gap: var(--space-md);
+    flex-wrap: wrap;
+}
+
+@media (max-width: 600px) {
+    .cr-actions {
+        flex-direction: column;
+    }
+    .cr-kpi-grid {
+        grid-template-columns: 1fr 1fr;
+    }
+    .cr-status-bar {
+        flex-direction: column;
+        text-align: center;
+    }
+}

@@ -1,0 +1,29 @@
+{
+  "name": "stockcell",
+  "version": "1.0.52",
+  "description": "StockCell - Sistema de Gestão de Vendas e Estoque",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "keywords": [
+    "pdv",
+    "estoque",
+    "vendas",
+    "gestao"
+  ],
+  "author": "Marcello",
+  "license": "PRIVATE",
+  "dependencies": {
+    "bcrypt": "^5.1.1",
+    "better-sqlite3": "^11.7.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.0",
+    "express-session": "^1.18.1",
+    "jsbarcode": "^3.11.6",
+    "jspdf": "^2.5.2",
+    "multer": "^1.4.5-lts.1",
+    "nodemailer": "^8.0.7"
+  }
+}
