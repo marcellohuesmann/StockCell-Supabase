@@ -1,5 +1,5 @@
 const express = require('express');
-const session = require('express-session');
+const session = require('cookie-session');
 const crypto = require('crypto');
 const path = require('path');
 const os = require('os');
@@ -58,16 +58,14 @@ supabase.from('users').select('*', { count: 'exact', head: true }).then(({ count
 // Configurar Sessão
 const secret = process.env.SESSION_SECRET || 'stockcell_default_secret_123';
 
+app.set('trust proxy', 1);
+
 app.use(session({
     name: config.session.name || 'stockcell_session',
-    secret: secret,
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-        maxAge: config.session.maxAge || 24 * 60 * 60 * 1000,
-        httpOnly: true,
-        sameSite: 'lax',
-    }
+    keys: [secret],
+    maxAge: config.session.maxAge || 24 * 60 * 60 * 1000, // 24 hours
+    httpOnly: true,
+    sameSite: 'lax',
 }));
 
 // Rotas da API
