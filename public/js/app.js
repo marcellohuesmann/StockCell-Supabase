@@ -19,9 +19,6 @@ const App = {
             }
         } catch(e) {}
 
-        // Initialize offline database
-        try { await OfflineDB.init(); } catch (e) { console.warn('IndexedDB init:', e); }
-
         // Register PWA Service Worker
         if ('serviceWorker' in navigator) {
             try {
@@ -52,11 +49,6 @@ const App = {
 
         if (authenticated) {
             this.navigate('dashboard');
-            // Initial sync in background
-            SyncEngine.startAutoSync();
-            SyncEngine.syncAll().then(r => {
-                if (r.success) Toast.success('📡 ' + r.message);
-            });
         } else {
             this.navigate('login');
         }
