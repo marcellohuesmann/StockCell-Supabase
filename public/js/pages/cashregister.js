@@ -34,9 +34,6 @@ const CashRegisterPage = {
 
         this.registerData = result.data;
 
-        const settings = JSON.parse(localStorage.getItem('sc_offline_settings') || '{}');
-        this.isPcMain = settings.terminal_mode === 'pc_main';
-
         if (!this.registerData) {
             this.renderClosed(container);
         } else {
@@ -54,11 +51,9 @@ const CashRegisterPage = {
                 <div class="form-group" style="max-width:280px;margin:0 auto var(--space-lg);">
                     <label class="form-label">Saldo Inicial (R$)</label>
                     <input type="number" class="form-input" id="cr-opening-balance" value="0" min="0" step="0.01"
-                        style="text-align:center;font-size:var(--font-size-xl);font-weight:700;" ${this.isPcMain ? 'disabled' : ''}>
+                        style="text-align:center;font-size:var(--font-size-xl);font-weight:700;">
                 </div>
-                ${this.isPcMain 
-                    ? `<div class="badge badge-warning" style="margin-bottom:10px;">⚠️ Abertura bloqueada no celular (Modo Vendedor)</div>` 
-                    : `<button class="btn btn-primary btn-lg" id="btn-open-register" style="min-width:200px;">🔓 Abrir Caixa</button>`}
+                <button class="btn btn-primary btn-lg" id="btn-open-register" style="min-width:200px;">🔓 Abrir Caixa</button>
             </div>
 
             <div style="margin-top:var(--space-xl);">
@@ -120,11 +115,15 @@ const CashRegisterPage = {
 
             <!-- Ações -->
             <div class="cr-actions">
-                ${this.isPcMain 
-                    ? `<div style="text-align:center;width:100%;color:var(--warning);font-size:var(--font-size-sm);background:var(--warning-bg);padding:var(--space-sm);border-radius:var(--radius-sm);">⚠️ Ações de caixa devem ser realizadas no Computador Central.</div>`
-                    : `<button class="btn btn-warning" id="btn-withdraw" style="flex:1;">📤 Sangria</button>
-                       <button class="btn btn-success" id="btn-supply" style="flex:1;">📥 Suprimento</button>
-                       <button class="btn btn-danger" id="btn-close-register" style="flex:1;">🔒 Fechar Caixa</button>`}
+                <button class="btn btn-warning" id="btn-withdraw" style="flex:1;">📤 Sangria</button>
+                <button class="btn btn-success" id="btn-supply" style="flex:1;">📥 Suprimento</button>
+                <button class="btn btn-danger" id="btn-close-register" style="flex:1;">🔒 Fechar Caixa</button>
+            </div>
+            
+            <div style="margin-top:var(--space-md);">
+                <button class="btn btn-primary" onclick="App.navigate('pdv')" style="width:100%; padding:18px; font-size:1.2rem; font-weight:800; border-radius:var(--radius-lg); box-shadow:0 4px 15px rgba(99,102,241,0.3); background:linear-gradient(135deg, var(--accent-primary), var(--accent-hover));">
+                    🛒 NOVA VENDA (PDV)
+                </button>
             </div>
 
             <!-- Movimentações do dia -->
@@ -148,11 +147,9 @@ const CashRegisterPage = {
             ` : ''}
         `;
 
-        if (!this.isPcMain) {
-            document.getElementById('btn-withdraw').addEventListener('click', () => this.showMovementModal('withdraw'));
-            document.getElementById('btn-supply').addEventListener('click', () => this.showMovementModal('supply'));
-            document.getElementById('btn-close-register').addEventListener('click', () => this.showCloseModal());
-        }
+        document.getElementById('btn-withdraw').addEventListener('click', () => this.showMovementModal('withdraw'));
+        document.getElementById('btn-supply').addEventListener('click', () => this.showMovementModal('supply'));
+        document.getElementById('btn-close-register').addEventListener('click', () => this.showCloseModal());
     },
 
     // ===== AÇÕES =====
