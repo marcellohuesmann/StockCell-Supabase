@@ -65,15 +65,11 @@ startRecurrenceScheduler();
     const secret = await getSessionSecret();
     
     app.use(session({
-        secret: secret,
-        name: config.session.name,
-        resave: false,
-        saveUninitialized: false,
-        cookie: {
-            maxAge: config.session.maxAge,
-            httpOnly: true,
-            sameSite: 'lax',
-        },
+        name: config.session.name || 'stockcell_session',
+        keys: [secret],
+        maxAge: config.session.maxAge || 24 * 60 * 60 * 1000, // 24 hours by default
+        httpOnly: true,
+        sameSite: 'lax',
     }));
 
     app.use('/api/auth', require('./server/routes/auth'));

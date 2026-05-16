@@ -106,17 +106,10 @@ router.post('/logout', async (req, res) => {
         }
     }
 
-    req.session.destroy((err) => {
-        if (err) {
-            return res.status(500).json({
-                success: false,
-                message: 'Erro ao encerrar sessão.',
-            });
-        }
-        res.json({
-            success: true,
-            message: 'Logout realizado com sucesso.',
-        });
+    req.session = null;
+    res.json({
+        success: true,
+        message: 'Logout realizado com sucesso.',
     });
 });
 
