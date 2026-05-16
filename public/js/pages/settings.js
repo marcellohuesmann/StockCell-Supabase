@@ -462,12 +462,6 @@ const SettingsPage = {
                     if (r.success) {
                         Toast.success(r.message);
                         document.querySelector('.modal-overlay').remove();
-                        // Limpa o banco offline também
-                        try {
-                            for (const store of OfflineDB.STORES) {
-                                if (store !== 'app_settings') await OfflineDB.clear(store);
-                            }
-                        } catch(e) {}
                         setTimeout(() => window.location.reload(), 2000);
                     } else {
                         Toast.error(r.message);
@@ -476,5 +470,6 @@ const SettingsPage = {
                     }
                 });
             });
+        }
     }
 };
