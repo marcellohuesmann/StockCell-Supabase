@@ -306,10 +306,13 @@ const App = {
     },
 
     renderBottomNav(activePage) {
-        const defaultItems = ['dashboard', 'pdv', 'products', 'stock', 'settings'];
+        const defaultItems = ['dashboard', 'pdv', 'os', 'stock', 'settings'];
         let selectedKeys = [];
         try {
-            selectedKeys = JSON.parse(localStorage.getItem('sc_bottom_nav')) || defaultItems;
+            selectedKeys = JSON.parse(localStorage.getItem('sc_bottom_nav'));
+            if (!selectedKeys || !selectedKeys.includes('os')) {
+                selectedKeys = defaultItems; // Force reset to include OS
+            }
         } catch(e) { selectedKeys = defaultItems; }
 
         if (!selectedKeys || !selectedKeys.length) selectedKeys = defaultItems;

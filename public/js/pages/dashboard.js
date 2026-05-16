@@ -38,11 +38,15 @@ const DashboardPage = {
         const container = document.getElementById('dashboard-content');
 
         container.innerHTML = `
-            <!-- Ação Rápida (PDV) -->
-            <div style="margin-bottom: var(--space-xl); animation: slideUp .4s ease forwards;">
-                <button class="btn btn-primary" style="width: 100%; padding: 24px; font-size: 20px; font-weight: 700; border-radius: 16px; box-shadow: 0 12px 28px rgba(102,126,234,0.3); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; transition: transform 0.2s, box-shadow 0.2s;" onclick="App.navigate('pdv')" onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 15px 35px rgba(102,126,234,0.4)'" onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='0 12px 28px rgba(102,126,234,0.3)'">
+            <!-- Ações Rápidas -->
+            <div style="margin-bottom: var(--space-xl); display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--space-md); animation: slideUp .4s ease forwards;">
+                <button class="btn btn-primary" style="padding: 24px; font-size: 20px; font-weight: 700; border-radius: 16px; box-shadow: 0 12px 28px rgba(102,126,234,0.3); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; transition: transform 0.2s, box-shadow 0.2s;" onclick="App.navigate('pdv')" onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 15px 35px rgba(102,126,234,0.4)'" onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='0 12px 28px rgba(102,126,234,0.3)'">
                     <span style="font-size: 36px; line-height: 1;">🛒</span>
                     NOVA VENDA (PDV)
+                </button>
+                <button class="btn" style="background: linear-gradient(135deg, #f59e0b, #d97706); color: white; padding: 24px; font-size: 20px; font-weight: 700; border-radius: 16px; box-shadow: 0 12px 28px rgba(245,158,11,0.3); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; border: none; cursor: pointer; transition: transform 0.2s, box-shadow 0.2s;" onclick="App.navigate('os')" onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 15px 35px rgba(245,158,11,0.4)'" onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='0 12px 28px rgba(245,158,11,0.3)'">
+                    <span style="font-size: 36px; line-height: 1;">🛠️</span>
+                    ASSIST. TÉCNICA (O.S.)
                 </button>
             </div>
 

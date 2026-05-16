@@ -25,13 +25,27 @@ router.get('/', async (req, res) => {
             }
         }
         
-        const osList = (osListRaw || []).map(os => ({
-            ...os,
-            customer_name: os.customers?.name,
-            customer_phone: os.customers?.phone,
-            customer_email: os.customers?.email,
-            missing_parts_count: itemsMap[os.id] || 0
-        }));
+        const osList = (osListRaw || []).map(os => {
+            // Extrair serial number caso exista " (SN: ...)"
+            let device_model = os.device_info || '';
+            let device_serial = '';
+            const match = device_model.match(/(.*)\s+\(SN:\s+(.*)\)$/);
+            if (match) {
+                device_model = match[1];
+                device_serial = match[2];
+            }
+
+            return {
+                ...os,
+                device_model,
+                device_serial,
+                reported_defect: os.defect_reported,
+                customer_name: os.customers?.name,
+                customer_phone: os.customers?.phone,
+                customer_email: os.customers?.email,
+                missing_parts_count: itemsMap[os.id] || 0
+            };
+        });
 
         res.json({ success: true, data: osList });
     } catch (error) {
@@ -45,6 +59,18 @@ router.get('/:id', async (req, res) => {
     try {
         const { data: os } = await supabase.from('service_orders').select('*, customers(name, phone, email)').eq('id', req.params.id).maybeSingle();
         if (!os) return res.status(404).json({ success: false, message: 'O.S. não encontrada.' });
+
+        // Mapeamento de campos DB -> Frontend
+        let device_model = os.device_info || '';
+        let device_serial = '';
+        const match = device_model.match(/(.*)\s+\(SN:\s+(.*)\)$/);
+        if (match) {
+            device_model = match[1];
+            device_serial = match[2];
+        }
+        os.device_model = device_model;
+        os.device_serial = device_serial;
+        os.reported_defect = os.defect_reported;
 
         os.customer_name = os.customers?.name;
         os.customer_phone = os.customers?.phone;
@@ -73,8 +99,14 @@ router.post('/', async (req, res) => {
             return res.status(400).json({ success: false, message: 'Modelo do aparelho e defeito relatado são obrigatórios.' });
         }
 
+        const device_info = device_serial ? `${device_model} (SN: ${device_serial})` : device_model;
+
         const { data: info, error } = await supabase.from('service_orders').insert({
-            customer_id: customer_id || null, device_model, device_serial: device_serial || null, device_password: device_password || null, reported_defect, technical_report: technical_report || null, created_by: req.session.userId
+            customer_id: customer_id || null, 
+            device_info, 
+            device_password: device_password || null, 
+            defect_reported: reported_defect, 
+            technical_report: technical_report || null
         }).select('id').single();
         if (error) throw error;
 
@@ -97,13 +129,22 @@ router.put('/:id', async (req, res) => {
         const { data: existingOs } = await supabase.from('service_orders').select('*').eq('id', req.params.id).maybeSingle();
         if (!existingOs) return res.status(404).json({ success: false, message: 'O.S. não encontrada.' });
 
+        // Recuperar device_model e device_serial originais para update parcial
+        let orig_model = existingOs.device_info || '';
+        let orig_serial = '';
+        const match = orig_model.match(/(.*)\s+\(SN:\s+(.*)\)$/);
+        if (match) { orig_model = match[1]; orig_serial = match[2]; }
+
+        const final_model = device_model !== undefined ? device_model : orig_model;
+        const final_serial = device_serial !== undefined ? device_serial : orig_serial;
+        const device_info = final_serial ? `${final_model} (SN: ${final_serial})` : final_model;
+
         const { error } = await supabase.from('service_orders').update({
             customer_id: customer_id || existingOs.customer_id,
-            device_model: device_model || existingOs.device_model,
-            device_serial: device_serial || existingOs.device_serial,
-            device_password: device_password || existingOs.device_password,
-            reported_defect: reported_defect || existingOs.reported_defect,
-            technical_report: technical_report || existingOs.technical_report,
+            device_info,
+            device_password: device_password !== undefined ? device_password : existingOs.device_password,
+            defect_reported: reported_defect !== undefined ? reported_defect : existingOs.defect_reported,
+            technical_report: technical_report !== undefined ? technical_report : existingOs.technical_report,
             updated_at: new Date().toISOString()
         }).eq('id', req.params.id);
         if (error) throw error;
