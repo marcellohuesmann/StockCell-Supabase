@@ -739,16 +739,17 @@ const OSPage = {
 
         const storeName = settings.store_name || 'STOCKCELL APP';
         
-        const printWindow = window.open('', '_blank');
-        printWindow.document.write(`
+        const htmlContent = `
             <html>
             <head>
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
                 <title>Termo de Entrada O.S. #${id}</title>
                 <style>
-                    body { font-family: 'Courier New', Courier, monospace; margin: 0; padding: 15px; font-size: 14px; max-width: 300px; }
+                    body { font-family: 'Courier New', Courier, monospace; margin: 0; padding: 15px; font-size: 14px; max-width: 300px; margin: 0 auto; }
                     .center { text-align: center; }
                     .bold { font-weight: bold; }
                     .divider { border-top: 1px dashed #000; margin: 10px 0; }
+                    @media print { .no-print { display: none !important; } }
                 </style>
             </head>
             <body>
@@ -772,14 +773,77 @@ const OSPage = {
                 <br><br>
                 <div class="center">_______________________________</div>
                 <div class="center" style="font-size:12px;">Assinatura do Cliente</div>
-                
-                <script>
-                    window.onload = function() { window.print(); window.close(); }
-                </script>
             </body>
             </html>
-        `);
-        printWindow.document.close();
+        `;
+
+        this._openPrintOverlay(htmlContent, `Termo O.S. #${id}`);
+    },
+
+    _openPrintOverlay(htmlContent, title) {
+        // Remove overlay anterior se existir
+        const existing = document.getElementById('os-print-overlay');
+        if (existing) existing.remove();
+
+        const overlay = document.createElement('div');
+        overlay.id = 'os-print-overlay';
+        overlay.style.cssText = 'position:fixed; top:0; left:0; width:100%; height:100%; background:#fff; z-index:99999; display:flex; flex-direction:column;';
+        
+        // Toolbar
+        const toolbar = document.createElement('div');
+        toolbar.style.cssText = 'display:flex; align-items:center; justify-content:space-between; padding:10px 16px; background:#1F2937; color:white; flex-shrink:0; gap:8px;';
+        toolbar.innerHTML = `
+            <button onclick="document.getElementById('os-print-overlay').remove()" style="background:none; border:none; color:white; font-size:24px; cursor:pointer; padding:4px 8px;">✕</button>
+            <span style="font-size:14px; font-weight:600; flex:1; text-align:center;">${title}</span>
+            <div style="display:flex; gap:8px;">
+                <button onclick="OSPage._doPrint()" style="padding:8px 16px; background:#4F46E5; color:white; border:none; border-radius:8px; font-weight:bold; font-size:13px; cursor:pointer;">🖨️ Imprimir</button>
+                ${navigator.share ? `<button onclick="OSPage._doShare()" style="padding:8px 16px; background:#10B981; color:white; border:none; border-radius:8px; font-weight:bold; font-size:13px; cursor:pointer;">📤 Enviar</button>` : ''}
+            </div>
+        `;
+        
+        // Iframe
+        const iframe = document.createElement('iframe');
+        iframe.id = 'os-print-iframe';
+        iframe.style.cssText = 'flex:1; border:none; width:100%; background:white;';
+        
+        overlay.appendChild(toolbar);
+        overlay.appendChild(iframe);
+        document.body.appendChild(overlay);
+        
+        // Escrever conteúdo no iframe
+        const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+        iframeDoc.open();
+        iframeDoc.write(htmlContent);
+        iframeDoc.close();
+        
+        // Salvar referência do HTML para compartilhar
+        this._currentPrintHtml = htmlContent;
+    },
+
+    _doPrint() {
+        const iframe = document.getElementById('os-print-iframe');
+        if (iframe) {
+            try {
+                iframe.contentWindow.focus();
+                iframe.contentWindow.print();
+            } catch (e) {
+                // Fallback: usa window.print com o conteúdo
+                window.print();
+            }
+        }
+    },
+
+    async _doShare() {
+        if (!navigator.share) return;
+        try {
+            await navigator.share({
+                title: 'Documento StockCell',
+                text: 'Documento da Ordem de Serviço',
+                url: window.location.href
+            });
+        } catch (e) {
+            // Usuário cancelou
+        }
     },
     async sendEmail(id, providedEmail = null) {
         const email = providedEmail || prompt("Qual o e-mail do cliente?");
@@ -815,8 +879,6 @@ const OSPage = {
             return;
         }
 
-        const printWindow = window.open('', '_blank');
-        
         let itemsHtml = '';
         if (os.items && os.items.length > 0) {
             itemsHtml = `
@@ -860,7 +922,7 @@ const OSPage = {
             'cancelled': 'Cancelado'
         };
 
-        printWindow.document.write(`
+        const htmlContent = `
             <html>
             <head>
                 <title>Relatório de Orçamento O.S. #${id}</title>
@@ -1049,8 +1111,9 @@ const OSPage = {
                 </script>
             </body>
             </html>
-        `);
-        printWindow.document.close();
+        `;
+
+        this._openPrintOverlay(htmlContent, `Relatório O.S. #${id}`);
     },
 
     promptPayment(os) {
