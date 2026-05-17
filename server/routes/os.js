@@ -77,7 +77,12 @@ router.get('/:id', async (req, res) => {
         os.customer_email = os.customers?.email;
 
         const { data: itemsRaw } = await supabase.from('os_items').select('*, products(name)').eq('os_id', os.id);
-        const items = (itemsRaw || []).map(i => ({ ...i, product_name: i.products?.name }));
+        const items = (itemsRaw || []).map(i => ({
+            ...i,
+            item_type: i.is_service ? 'service' : 'product',
+            total_price: i.quantity * i.unit_price,
+            product_name: i.products?.name
+        }));
 
         const { data: history } = await supabase.from('activity_log').select('description, created_at').eq('entity', 'os').eq('entity_id', os.id).order('created_at', { ascending: true });
 
@@ -241,15 +246,17 @@ router.post('/:id/items', async (req, res) => {
         const { item_type, product_id, description, quantity, unit_price } = req.body;
         if (!item_type || !description || quantity < 1 || unit_price < 0) return res.status(400).json({ success: false, message: 'Dados do item inválidos.' });
 
-        const total_price = quantity * unit_price;
+        const is_service = item_type === 'service';
 
-        await supabase.from('os_items').insert({
-            os_id: req.params.id, item_type, product_id: product_id || null, description, quantity, unit_price, total_price
+        const { error: insertError } = await supabase.from('os_items').insert({
+            os_id: req.params.id, is_service, product_id: product_id || null, description, quantity, unit_price
         });
+        if (insertError) throw insertError;
 
-        const { data: itemsRaw } = await supabase.from('os_items').select('item_type, total_price').eq('os_id', req.params.id);
-        const parts = (itemsRaw || []).filter(i => i.item_type === 'product').reduce((s, i) => s + i.total_price, 0);
-        const labor = (itemsRaw || []).filter(i => i.item_type === 'service').reduce((s, i) => s + i.total_price, 0);
+        // Recalcular totais da O.S.
+        const { data: itemsRaw } = await supabase.from('os_items').select('is_service, quantity, unit_price').eq('os_id', req.params.id);
+        const parts = (itemsRaw || []).filter(i => !i.is_service).reduce((s, i) => s + (i.quantity * i.unit_price), 0);
+        const labor = (itemsRaw || []).filter(i => i.is_service).reduce((s, i) => s + (i.quantity * i.unit_price), 0);
         const total = parts + labor;
 
         await supabase.from('service_orders').update({
@@ -271,9 +278,9 @@ router.delete('/items/:itemId', async (req, res) => {
 
         await supabase.from('os_items').delete().eq('id', req.params.itemId);
 
-        const { data: itemsRaw } = await supabase.from('os_items').select('item_type, total_price').eq('os_id', item.os_id);
-        const parts = (itemsRaw || []).filter(i => i.item_type === 'product').reduce((s, i) => s + i.total_price, 0);
-        const labor = (itemsRaw || []).filter(i => i.item_type === 'service').reduce((s, i) => s + i.total_price, 0);
+        const { data: itemsRaw } = await supabase.from('os_items').select('is_service, quantity, unit_price').eq('os_id', item.os_id);
+        const parts = (itemsRaw || []).filter(i => !i.is_service).reduce((s, i) => s + (i.quantity * i.unit_price), 0);
+        const labor = (itemsRaw || []).filter(i => i.is_service).reduce((s, i) => s + (i.quantity * i.unit_price), 0);
         const total = parts + labor;
 
         await supabase.from('service_orders').update({
