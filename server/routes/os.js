@@ -88,6 +88,12 @@ router.get('/:id', async (req, res) => {
 
         os.items = items;
         os.history = history || [];
+
+        // Calcular totais a partir dos itens
+        os.total_parts = items.filter(i => i.item_type === 'product').reduce((s, i) => s + i.total_price, 0);
+        os.total_labor = items.filter(i => i.item_type === 'service').reduce((s, i) => s + i.total_price, 0);
+        os.total_amount = os.total_parts + os.total_labor;
+
         res.json({ success: true, data: os });
     } catch (error) {
         console.error('Erro ao buscar O.S.:', error);
@@ -260,7 +266,7 @@ router.post('/:id/items', async (req, res) => {
         const total = parts + labor;
 
         await supabase.from('service_orders').update({
-            total_parts: parts, total_labor: labor, total_amount: total, updated_at: new Date().toISOString()
+            total_amount: total, updated_at: new Date().toISOString()
         }).eq('id', req.params.id);
 
         res.json({ success: true, message: 'Item adicionado ao orçamento.' });
@@ -284,7 +290,7 @@ router.delete('/items/:itemId', async (req, res) => {
         const total = parts + labor;
 
         await supabase.from('service_orders').update({
-            total_parts: parts, total_labor: labor, total_amount: total, updated_at: new Date().toISOString()
+            total_amount: total, updated_at: new Date().toISOString()
         }).eq('id', item.os_id);
 
         res.json({ success: true, message: 'Item removido do orçamento.' });
