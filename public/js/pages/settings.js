@@ -227,7 +227,7 @@ const SettingsPage = {
         });
 
         // Bottom nav config logic
-        const defaultItems = ['dashboard', 'pdv', 'products', 'stock', 'settings'];
+        const defaultItems = ['dashboard', 'pdv', 'stock', 'settings'];
         let selectedKeys = [];
         try { selectedKeys = JSON.parse(localStorage.getItem('sc_bottom_nav')) || defaultItems; } catch(e) { selectedKeys = defaultItems; }
         if (!selectedKeys || !selectedKeys.length) selectedKeys = defaultItems;
@@ -241,6 +241,7 @@ const SettingsPage = {
             { id: 'customers', label: 'Clientes' },
             { id: 'suppliers', label: 'Fornecedores' },
             { id: 'stock', label: 'Estoque' },
+            { id: 'os', label: 'Assist. Técnica (O.S.)' },
             { id: 'financial', label: 'Financeiro' },
             { id: 'reports', label: 'Relatórios' },
             { id: 'settings', label: 'Configurações' }

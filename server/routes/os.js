@@ -293,7 +293,6 @@ router.post('/:id/email', async (req, res) => {
         const { target_email } = req.body;
         if (!target_email) return res.status(400).json({ success: false, message: 'E-mail de destino não informado.' });
 
-        const db = getDatabase();
         const id = req.params.id;
 
         const { data: os } = await supabase.from('service_orders').select('*, customers(name, phone, email)').eq('id', id).maybeSingle();

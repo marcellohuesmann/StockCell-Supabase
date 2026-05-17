@@ -4,6 +4,7 @@
 const Sidebar = {
     render(activePage) {
         const user = Auth.getUser();
+        const isAdmin = user && user.role === 'admin';
         const initials = user ? user.fullName.split(' ').map(n => n[0]).join('').substring(0, 2).toUpperCase() : 'AD';
 
         return `
@@ -59,6 +60,7 @@ const Sidebar = {
                     </div>
 
                     <div class="sidebar-section-title">Gestão</div>
+                    ${isAdmin ? `
                     <div class="nav-item ${activePage === 'stock' ? 'active' : ''}" data-page="stock">
                         ${Icons.package}
                         <span>Estoque</span>
@@ -67,11 +69,13 @@ const Sidebar = {
                         ${Icons.dollarSign}
                         <span>Financeiro</span>
                     </div>
+                    ` : ''}
                     <div class="nav-item ${activePage === 'reports' ? 'active' : ''}" data-page="reports">
                         ${Icons.barChart}
                         <span>Relatórios</span>
                     </div>
 
+                    ${isAdmin ? `
                     <div class="sidebar-section-title">Sistema</div>
                     <div class="nav-item ${activePage === 'logs' ? 'active' : ''}" data-page="logs">
                         📝
@@ -81,6 +85,7 @@ const Sidebar = {
                         ${Icons.settings}
                         <span>Configurações</span>
                     </div>
+                    ` : ''}
                     <div class="nav-item" id="btn-install-pwa">
                         📲
                         <span>Instalar Aplicativo</span>

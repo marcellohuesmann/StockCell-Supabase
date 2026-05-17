@@ -1,4 +1,4 @@
-const CACHE_NAME = 'stockcell-v49';
+const CACHE_NAME = 'stockcell-v50';
 const STATIC_ASSETS = [
     '/',
     '/index.html',
@@ -31,6 +31,7 @@ const STATIC_ASSETS = [
     '/js/pages/pdv.js',
     '/js/pages/cashregister.js',
     '/js/pages/stock.js',
+    '/js/pages/os.js',
     '/js/pages/finance.js',
     '/js/pages/settings.js',
     '/js/pages/reports.js',

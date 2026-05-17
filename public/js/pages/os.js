@@ -5,6 +5,7 @@ const OSPage = {
     osList: [],
     customers: [],
     products: [], // Para puxar peças
+    selectedCardId: null,
 
     render() {
         return `
@@ -35,7 +36,12 @@ const OSPage = {
             
             if (osRes.success) this.osList = osRes.data;
             if (custRes.success) this.customers = custRes.data;
-            if (prodRes.success) this.products = prodRes.data.filter(p => p.active);
+            if (prodRes.success) {
+                this.products = Array.isArray(prodRes.data) ? prodRes.data : [];
+                console.log(`[O.S.] Produtos carregados: ${this.products.length} (${this.products.filter(p => p.is_service).length} serviços, ${this.products.filter(p => !p.is_service).length} peças)`);
+            } else {
+                console.warn('[O.S.] Falha ao carregar produtos:', prodRes.message);
+            }
             
             this.renderKanban();
         } catch (e) {
@@ -63,7 +69,7 @@ const OSPage = {
             const items = this.osList.filter(o => o.status === col.id);
             html += `
                 <div class="kanban-column" style="background:var(--bg-card); border:1px solid var(--border); border-radius:12px; width:280px; min-width:280px; display:flex; flex-direction:column; max-height:100%;">
-                    <div class="kanban-column-header" style="padding:15px; border-bottom:1px solid var(--border); font-weight:bold; display:flex; justify-content:space-between; align-items:center;">
+                    <div class="kanban-column-header" data-col-status="${col.id}" onclick="OSPage.onColumnClick('${col.id}')" style="padding:15px; border-bottom:1px solid var(--border); font-weight:bold; display:flex; justify-content:space-between; align-items:center; cursor:pointer; transition:background 0.2s;">
                         <div style="display:flex; align-items:center; gap:8px;">
                             <div style="width:10px; height:10px; border-radius:50%; background-color:${col.color}"></div>
                             ${col.title}
@@ -129,6 +135,12 @@ const OSPage = {
                     <div style="font-size:12px; font-weight:bold; color:${os.total_amount > 0 ? 'var(--success)' : 'var(--text-muted)'};">
                         ${Utils.formatCurrency(os.total_amount)}
                     </div>
+                    <button onclick="event.stopPropagation(); OSPage.showMoveOptions(${os.id}, event)"
+                        title="Mover O.S. para outra etapa"
+                        style="background:none; border:1px solid var(--border); border-radius:6px; padding:3px 8px; cursor:pointer; font-size:11px; color:var(--text-muted); display:flex; align-items:center; gap:3px; transition:all 0.15s;"
+                        onmouseover="this.style.borderColor='var(--accent-primary)'; this.style.color='var(--accent-primary)'"
+                        onmouseout="this.style.borderColor='var(--border)'; this.style.color='var(--text-muted)'"
+                    >↔ Mover</button>
                 </div>
             </div>
         `;
@@ -217,6 +229,108 @@ const OSPage = {
             os.status = oldStatus; // Revert
             this.renderKanban();
         }
+    },
+
+    // ===== CLICK-TO-MOVE (Mobile/Touch-Friendly) =====
+    showMoveOptions(osId, event) {
+        event.stopPropagation();
+        const os = this.osList.find(o => o.id == osId);
+        if (!os) return;
+
+        // Toggle: se clicar no mesmo card, deseleciona
+        if (this.selectedCardId == osId) { this.clearSelection(); return; }
+
+        this.clearSelection();
+        this.selectedCardId = osId;
+
+        // Destacar card selecionado
+        const card = document.querySelector(`.kanban-card[data-id="${osId}"]`);
+        if (card) {
+            card.style.outline = '2px solid var(--accent-primary)';
+            card.style.outlineOffset = '2px';
+            card.style.boxShadow = '0 0 15px rgba(99,102,241,0.35)';
+        }
+
+        // Destacar colunas-destino válidas
+        document.querySelectorAll('.kanban-column-header').forEach(h => {
+            if (h.dataset.colStatus !== os.status) {
+                h.style.background = 'rgba(99,102,241,0.08)';
+                h.style.borderBottom = '2px solid var(--accent-primary)';
+            }
+        });
+
+        const statuses = [
+            { id: 'budgeting', title: 'Orçamentando', color: 'var(--text-muted)' },
+            { id: 'waiting_parts', title: 'Aguard. Peça', color: 'var(--warning)' },
+            { id: 'approved', title: 'Aprovado', color: 'var(--accent-primary)' },
+            { id: 'in_repair', title: 'Em Reparo', color: 'var(--info)' },
+            { id: 'ready', title: 'Pronto', color: 'var(--success)' },
+            { id: 'delivered', title: 'Entregue', color: 'var(--text-main)' }
+        ].filter(s => s.id !== os.status);
+
+        const panel = document.createElement('div');
+        panel.id = `move-panel-${osId}`;
+        panel.className = 'kanban-move-panel';
+        panel.style.cssText = 'display:flex; flex-wrap:wrap; gap:4px; padding:8px; margin-top:6px; background:var(--bg-card); border:1px solid var(--accent-primary); border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,0.15);';
+        panel.innerHTML = `
+            <div style="width:100%; font-size:10px; color:var(--text-muted); margin-bottom:2px; font-weight:600; text-transform:uppercase; letter-spacing:0.5px;">📍 Mover para:</div>
+            ${statuses.map(s => `
+                <button onclick="event.stopPropagation(); OSPage.moveCard(${osId}, '${s.id}')"
+                    style="flex:1; min-width:calc(33% - 4px); padding:6px 4px; border:1px solid var(--border); background:var(--bg-main); color:var(--text-main); border-radius:6px; cursor:pointer; font-size:11px; display:flex; align-items:center; gap:4px; justify-content:center; transition:all 0.15s;"
+                    onmouseover="this.style.borderColor='var(--accent-primary)'; this.style.background='var(--bg-secondary)'; this.style.transform='scale(1.03)'"
+                    onmouseout="this.style.borderColor='var(--border)'; this.style.background='var(--bg-main)'; this.style.transform='scale(1)'"
+                ><span style="width:8px; height:8px; border-radius:50%; background:${s.color}; flex-shrink:0;"></span>${s.title}</button>
+            `).join('')}
+        `;
+        if (card) card.after(panel);
+    },
+
+    clearSelection() {
+        this.selectedCardId = null;
+        document.querySelectorAll('.kanban-card').forEach(c => {
+            c.style.outline = '';
+            c.style.outlineOffset = '';
+            c.style.boxShadow = '0 2px 4px rgba(0,0,0,0.05)';
+        });
+        document.querySelectorAll('.kanban-move-panel').forEach(p => p.remove());
+        document.querySelectorAll('.kanban-column-header').forEach(h => {
+            h.style.background = '';
+            h.style.borderBottom = '1px solid var(--border)';
+        });
+    },
+
+    async moveCard(osId, newStatus) {
+        const os = this.osList.find(o => o.id == osId);
+        if (!os) return;
+        const oldStatus = os.status;
+        this.clearSelection();
+
+        if (newStatus === 'approved' && ['budgeting', 'waiting_parts'].includes(oldStatus)) {
+            try {
+                const res = await API.get(`/os/${osId}`);
+                if (!res.success) throw new Error();
+                const fullOs = res.data;
+                const itemsRequiringSerials = [];
+                for (let item of fullOs.items) {
+                    if (item.item_type === 'product') {
+                        const prod = this.products.find(p => p.id === item.product_id);
+                        if (prod && prod.track_serial) itemsRequiringSerials.push(item);
+                    }
+                }
+                if (itemsRequiringSerials.length > 0) {
+                    this.promptForSerials(osId, itemsRequiringSerials, newStatus, oldStatus);
+                    return;
+                }
+            } catch(e) { Toast.error('Erro ao verificar itens da O.S.'); return; }
+        }
+        await this.executeStatusChange(osId, newStatus, oldStatus, {});
+    },
+
+    onColumnClick(targetStatus) {
+        if (!this.selectedCardId) return;
+        const os = this.osList.find(o => o.id == this.selectedCardId);
+        if (!os || os.status === targetStatus) { this.clearSelection(); return; }
+        this.moveCard(this.selectedCardId, targetStatus);
     },
 
     promptForSerials(osId, items, newStatus, oldStatus) {
@@ -380,7 +494,7 @@ const OSPage = {
                             <input type="number" id="os-item-price" class="form-input" value="0.00" step="0.01">
                         </div>
                         <div>
-                            <button class="btn btn-primary" onclick="OSPage.addItem(${os.id})" style="height:42px; width:100%; white-space:nowrap;">Adicionar</button>
+                            <button type="button" class="btn btn-primary" onclick="OSPage.addItem(${os.id})" style="height:42px; width:100%; white-space:nowrap;">Adicionar</button>
                         </div>
                     </div>
 
@@ -404,7 +518,7 @@ const OSPage = {
                                         <td>${item.quantity}</td>
                                         <td>${Utils.formatCurrency(item.unit_price)}</td>
                                         <td style="font-weight:bold;">${Utils.formatCurrency(item.total_price)}</td>
-                                        <td><button class="btn btn-ghost btn-icon" onclick="OSPage.removeItem(${item.id}, ${os.id})" style="color:var(--danger)">🗑️</button></td>
+                                        <td><button type="button" class="btn btn-ghost btn-icon" onclick="OSPage.removeItem(${item.id}, ${os.id})" style="color:var(--danger)">🗑️</button></td>
                                     </tr>
                                 `).join('') : '<tr><td colspan="6" style="text-align:center; padding:20px; color:var(--text-muted);">Nenhum item adicionado.</td></tr>'}
                             </tbody>
@@ -441,7 +555,7 @@ const OSPage = {
     },
 
     switchTab(tab) {
-        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.tab-btn').forEach(t => t.classList.remove('active'));
         document.getElementById(`tab-os-${tab}`).classList.add('active');
         
         document.getElementById('os-basic-content').style.display = tab === 'basic' ? 'block' : 'none';
